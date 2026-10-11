@@ -12,6 +12,7 @@ add_library(malicompat SHARED
     malicompat-core/descriptor_virtualizer.cpp
     malicompat-core/descriptor_shim.cpp
     malicompat-core/vulkan_layer_exports.cpp
+    malicompat-core/bc_decompressor.cpp
 )
 
 target_include_directories(malicompat PUBLIC
