@@ -50,7 +50,7 @@ void InitRealVulkan() {
 extern "C" {
 
 // Android HAL Module Information symbol required by Android Vulkan loader when loaded via adrenotools
-__attribute__((visibility("default"))) struct {
+__attribute__((visibility("default"), used)) struct hw_module_t {
     uint32_t tag;
     uint16_t module_api_version;
     uint16_t hal_api_version;
@@ -68,10 +68,6 @@ __attribute__((visibility("default"))) struct {
     nullptr,
     {0}
 };
-
-} // namespace
-
-extern "C" {
 
 VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatures2(
     VkPhysicalDevice physicalDevice,
