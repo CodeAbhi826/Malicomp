@@ -187,8 +187,35 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(VkCommandBuffer b, VkPipeline
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateQueryPool(VkDevice d, const VkQueryPoolCreateInfo* c, const VkAllocationCallbacks* a, VkQueryPool* q) {
     return malicompat_vkCreateQueryPool(d, c, a, q);
 }
-VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2(VkPhysicalDevice g, VkPhysicalDeviceFeatures2* f) {
-    malicompat_vkGetPhysicalDeviceFeatures2(g, f);
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
+    return malicompat_vkGetInstanceProcAddr(instance, pName);
+}
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName) {
+    return malicompat_vkGetDeviceProcAddr(device, pName);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkInstance* pInstance) {
+    InitRealVulkan();
+    auto realCreate = reinterpret_cast<PFN_vkCreateInstance>(g_real_vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance"));
+    if (!realCreate) return VK_ERROR_INITIALIZATION_FAILED;
+    return realCreate(pCreateInfo, pAllocator, pInstance);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceVersion(uint32_t* pApiVersion) {
+    InitRealVulkan();
+    auto realEnum = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(g_real_vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
+    if (realEnum) return realEnum(pApiVersion);
+    if (pApiVersion) *pApiVersion = VK_API_VERSION_1_1;
+    return VK_SUCCESS;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumeratePhysicalDevices(VkInstance instance, uint32_t* pPhysicalDeviceCount, VkPhysicalDevice* pPhysicalDevices) {
+    InitRealVulkan();
+    auto realEnum = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(g_real_vkGetInstanceProcAddr(instance, "vkEnumeratePhysicalDevices"));
+    if (!realEnum) return VK_ERROR_INITIALIZATION_FAILED;
+    return realEnum(instance, pPhysicalDeviceCount, pPhysicalDevices);
+}
+VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* pAllocator) {
+    InitRealVulkan();
+    auto realDestroy = reinterpret_cast<PFN_vkDestroyInstance>(g_real_vkGetInstanceProcAddr(instance, "vkDestroyInstance"));
+    if (realDestroy) realDestroy(instance, pAllocator);
 }
 
 } // extern "C"
