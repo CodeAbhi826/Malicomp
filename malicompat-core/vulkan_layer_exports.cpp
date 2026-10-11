@@ -62,41 +62,27 @@ struct hwvulkan_device_t {
 
 namespace {
 
-void* g_real_vulkan = nullptr;
-PFN_vkGetInstanceProcAddr g_real_vkGetInstanceProcAddr = nullptr;
-PFN_vkGetDeviceProcAddr g_real_vkGetDeviceProcAddr = nullptr;
-
-PFN_vkCreateDescriptorSetLayout g_real_vkCreateDescriptorSetLayout = nullptr;
-PFN_vkAllocateDescriptorSets g_real_vkAllocateDescriptorSets = nullptr;
-PFN_vkUpdateDescriptorSets g_real_vkUpdateDescriptorSets = nullptr;
-PFN_vkCmdBindDescriptorSets g_real_vkCmdBindDescriptorSets = nullptr;
-PFN_vkCreateQueryPool g_real_vkCreateQueryPool = nullptr;
-PFN_vkGetPhysicalDeviceFeatures g_real_vkGetPhysicalDeviceFeatures = nullptr;
-PFN_vkGetPhysicalDeviceFeatures2 g_real_vkGetPhysicalDeviceFeatures2 = nullptr;
-PFN_vkEnumerateDeviceExtensionProperties g_real_vkEnumerateDeviceExtensionProperties = nullptr;
-PFN_vkCreateDevice g_real_vkCreateDevice = nullptr;
-PFN_vkCreateInstance g_real_vkCreateInstance = nullptr;
-PFN_vkEnumerateInstanceExtensionProperties g_real_vkEnumerateInstanceExtensionProperties = nullptr;
-
-std::once_flag g_init_flag;
 void* g_vendor_vulkan = nullptr;
 hwvulkan_device_t* g_vendor_device = nullptr;
 hwvulkan_device_t g_malicompat_device;
 
+PFN_vkCreateDescriptorSetLayout g_vendor_vkCreateDescriptorSetLayout = nullptr;
+PFN_vkAllocateDescriptorSets g_vendor_vkAllocateDescriptorSets = nullptr;
+PFN_vkUpdateDescriptorSets g_vendor_vkUpdateDescriptorSets = nullptr;
+PFN_vkCmdBindDescriptorSets g_vendor_vkCmdBindDescriptorSets = nullptr;
+PFN_vkCreateQueryPool g_vendor_vkCreateQueryPool = nullptr;
+PFN_vkGetPhysicalDeviceFeatures g_vendor_vkGetPhysicalDeviceFeatures = nullptr;
+PFN_vkGetPhysicalDeviceFeatures2 g_vendor_vkGetPhysicalDeviceFeatures2 = nullptr;
+PFN_vkEnumerateDeviceExtensionProperties g_vendor_vkEnumerateDeviceExtensionProperties = nullptr;
+PFN_vkCreateDevice g_vendor_vkCreateDevice = nullptr;
+PFN_vkCreateInstance g_vendor_vkCreateInstance = nullptr;
+PFN_vkEnumerateInstanceExtensionProperties g_vendor_vkEnumerateInstanceExtensionProperties = nullptr;
+
+std::once_flag g_init_flag;
+
 void InitRealVulkan() {
     std::call_once(g_init_flag, []() {
-        g_real_vulkan = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-        if (g_real_vulkan) {
-            g_real_vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(g_real_vulkan, "vkGetInstanceProcAddr"));
-            g_real_vkGetDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(dlsym(g_real_vulkan, "vkGetDeviceProcAddr"));
-            g_real_vkGetPhysicalDeviceFeatures = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(dlsym(g_real_vulkan, "vkGetPhysicalDeviceFeatures"));
-            g_real_vkGetPhysicalDeviceFeatures2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(dlsym(g_real_vulkan, "vkGetPhysicalDeviceFeatures2"));
-            g_real_vkEnumerateDeviceExtensionProperties = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(dlsym(g_real_vulkan, "vkEnumerateDeviceExtensionProperties"));
-            g_real_vkCreateDevice = reinterpret_cast<PFN_vkCreateDevice>(dlsym(g_real_vulkan, "vkCreateDevice"));
-            g_real_vkCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(dlsym(g_real_vulkan, "vkCreateInstance"));
-            g_real_vkEnumerateInstanceExtensionProperties = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(dlsym(g_real_vulkan, "vkEnumerateInstanceExtensionProperties"));
-        }
-        
+        // Forward directly to vendor Mali HAL
         g_vendor_vulkan = dlopen("/vendor/lib64/hw/vulkan.universal7884B.so", RTLD_NOW | RTLD_LOCAL);
         if (!g_vendor_vulkan) {
             g_vendor_vulkan = dlopen("/vendor/lib64/hw/vulkan.universal7904.so", RTLD_NOW | RTLD_LOCAL);
@@ -105,7 +91,21 @@ void InitRealVulkan() {
             g_vendor_vulkan = dlopen("/vendor/lib64/egl/libGLES_mali.so", RTLD_NOW | RTLD_LOCAL);
         }
 
-        LOGI("Initialized MaliCompat: real libvulkan=%p, vendor HAL=%p", g_real_vulkan, g_vendor_vulkan);
+        if (g_vendor_vulkan) {
+            g_vendor_vkCreateDescriptorSetLayout = reinterpret_cast<PFN_vkCreateDescriptorSetLayout>(dlsym(g_vendor_vulkan, "vkCreateDescriptorSetLayout"));
+            g_vendor_vkAllocateDescriptorSets = reinterpret_cast<PFN_vkAllocateDescriptorSets>(dlsym(g_vendor_vulkan, "vkAllocateDescriptorSets"));
+            g_vendor_vkUpdateDescriptorSets = reinterpret_cast<PFN_vkUpdateDescriptorSets>(dlsym(g_vendor_vulkan, "vkUpdateDescriptorSets"));
+            g_vendor_vkCmdBindDescriptorSets = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(dlsym(g_vendor_vulkan, "vkCmdBindDescriptorSets"));
+            g_vendor_vkCreateQueryPool = reinterpret_cast<PFN_vkCreateQueryPool>(dlsym(g_vendor_vulkan, "vkCreateQueryPool"));
+            g_vendor_vkGetPhysicalDeviceFeatures = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(dlsym(g_vendor_vulkan, "vkGetPhysicalDeviceFeatures"));
+            g_vendor_vkGetPhysicalDeviceFeatures2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(dlsym(g_vendor_vulkan, "vkGetPhysicalDeviceFeatures2"));
+            g_vendor_vkEnumerateDeviceExtensionProperties = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(dlsym(g_vendor_vulkan, "vkEnumerateDeviceExtensionProperties"));
+            g_vendor_vkCreateDevice = reinterpret_cast<PFN_vkCreateDevice>(dlsym(g_vendor_vulkan, "vkCreateDevice"));
+            g_vendor_vkCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(dlsym(g_vendor_vulkan, "vkCreateInstance"));
+            g_vendor_vkEnumerateInstanceExtensionProperties = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(dlsym(g_vendor_vulkan, "vkEnumerateInstanceExtensionProperties"));
+        }
+
+        LOGI("Initialized MaliCompat: vendor HAL=%p", g_vendor_vulkan);
     });
 }
 
@@ -120,12 +120,12 @@ static VkResult VKAPI_CALL malicompat_hal_EnumerateInstanceExtensionProperties(
     const char* pLayerName,
     uint32_t* pPropertyCount,
     VkExtensionProperties* pProperties) {
+    InitRealVulkan();
     if (g_vendor_device && g_vendor_device->EnumerateInstanceExtensionProperties) {
         return g_vendor_device->EnumerateInstanceExtensionProperties(pLayerName, pPropertyCount, pProperties);
     }
-    InitRealVulkan();
-    if (g_real_vkEnumerateInstanceExtensionProperties) {
-        return g_real_vkEnumerateInstanceExtensionProperties(pLayerName, pPropertyCount, pProperties);
+    if (g_vendor_vkEnumerateInstanceExtensionProperties) {
+        return g_vendor_vkEnumerateInstanceExtensionProperties(pLayerName, pPropertyCount, pProperties);
     }
     return VK_SUCCESS;
 }
@@ -134,12 +134,12 @@ static VkResult VKAPI_CALL malicompat_hal_CreateInstance(
     const VkInstanceCreateInfo* pCreateInfo,
     const VkAllocationCallbacks* pAllocator,
     VkInstance* pInstance) {
+    InitRealVulkan();
     if (g_vendor_device && g_vendor_device->CreateInstance) {
         return g_vendor_device->CreateInstance(pCreateInfo, pAllocator, pInstance);
     }
-    InitRealVulkan();
-    if (g_real_vkCreateInstance) {
-        return g_real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+    if (g_vendor_vkCreateInstance) {
+        return g_vendor_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
     }
     return VK_ERROR_INITIALIZATION_FAILED;
 }
@@ -206,12 +206,8 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
         realPfn = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(
             g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures"));
     }
-    if (!realPfn && g_real_vkGetPhysicalDeviceFeatures) {
-        realPfn = g_real_vkGetPhysicalDeviceFeatures;
-    }
-    if (!realPfn && g_real_vkGetInstanceProcAddr) {
-        realPfn = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(
-            g_real_vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures"));
+    if (!realPfn && g_vendor_vkGetPhysicalDeviceFeatures) {
+        realPfn = g_vendor_vkGetPhysicalDeviceFeatures;
     }
 
     if (realPfn) {
@@ -236,12 +232,8 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
         realPfn = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
             g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2"));
     }
-    if (!realPfn && g_real_vkGetPhysicalDeviceFeatures2) {
-        realPfn = g_real_vkGetPhysicalDeviceFeatures2;
-    }
-    if (!realPfn && g_real_vkGetInstanceProcAddr) {
-        realPfn = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
-            g_real_vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2"));
+    if (!realPfn && g_vendor_vkGetPhysicalDeviceFeatures2) {
+        realPfn = g_vendor_vkGetPhysicalDeviceFeatures2;
     }
 
     if (realPfn) {
@@ -297,12 +289,8 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkEnumerateDeviceExt
         realEnum = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
             g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties"));
     }
-    if (!realEnum && g_real_vkEnumerateDeviceExtensionProperties) {
-        realEnum = g_real_vkEnumerateDeviceExtensionProperties;
-    }
-    if (!realEnum && g_real_vkGetInstanceProcAddr) {
-        realEnum = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
-            g_real_vkGetInstanceProcAddr(nullptr, "vkEnumerateDeviceExtensionProperties"));
+    if (!realEnum && g_vendor_vkEnumerateDeviceExtensionProperties) {
+        realEnum = g_vendor_vkEnumerateDeviceExtensionProperties;
     }
 
     if (!pProperties) {
@@ -410,12 +398,8 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
         realCreate = reinterpret_cast<PFN_vkCreateDevice>(
             g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateDevice"));
     }
-    if (!realCreate && g_real_vkCreateDevice) {
-        realCreate = g_real_vkCreateDevice;
-    }
-    if (!realCreate && g_real_vkGetInstanceProcAddr) {
-        realCreate = reinterpret_cast<PFN_vkCreateDevice>(
-            g_real_vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateDevice"));
+    if (!realCreate && g_vendor_vkCreateDevice) {
+        realCreate = g_vendor_vkCreateDevice;
     }
 
     if (!realCreate) {
@@ -449,8 +433,9 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
         auto pfn = g_vendor_device->GetInstanceProcAddr(instance, pName);
         if (pfn) return pfn;
     }
-    if (g_real_vkGetInstanceProcAddr) {
-        return g_real_vkGetInstanceProcAddr(instance, pName);
+    if (g_vendor_vulkan) {
+        auto pfn = reinterpret_cast<PFN_vkVoidFunction>(dlsym(g_vendor_vulkan, pName));
+        if (pfn) return pfn;
     }
     return nullptr;
 }
@@ -466,8 +451,13 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
     if (std::strcmp(pName, "vkCmdBindDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdBindDescriptorSets);
     if (std::strcmp(pName, "vkCreateQueryPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateQueryPool);
 
-    if (g_real_vkGetDeviceProcAddr) {
-        return g_real_vkGetDeviceProcAddr(device, pName);
+    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+        auto pfn = g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, pName);
+        if (pfn) return pfn;
+    }
+    if (g_vendor_vulkan) {
+        auto pfn = reinterpret_cast<PFN_vkVoidFunction>(dlsym(g_vendor_vulkan, pName));
+        if (pfn) return pfn;
     }
     return nullptr;
 }
@@ -478,11 +468,8 @@ VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDescriptorSetLayout(
     const VkAllocationCallbacks* pAllocator,
     VkDescriptorSetLayout* pSetLayout) {
     InitRealVulkan();
-    if (!g_real_vkCreateDescriptorSetLayout && g_real_vulkan) {
-        g_real_vkCreateDescriptorSetLayout = reinterpret_cast<PFN_vkCreateDescriptorSetLayout>(dlsym(g_real_vulkan, "vkCreateDescriptorSetLayout"));
-    }
     return malicompat::VulkanDescriptorShim::Instance().InterceptCreateDescriptorSetLayout(
-        device, pCreateInfo, pAllocator, pSetLayout, g_real_vkCreateDescriptorSetLayout);
+        device, pCreateInfo, pAllocator, pSetLayout, g_vendor_vkCreateDescriptorSetLayout);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkAllocateDescriptorSets(
@@ -490,11 +477,8 @@ VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkAllocateDescriptorSets(
     const VkDescriptorSetAllocateInfo* pAllocateInfo,
     VkDescriptorSet* pDescriptorSets) {
     InitRealVulkan();
-    if (!g_real_vkAllocateDescriptorSets && g_real_vulkan) {
-        g_real_vkAllocateDescriptorSets = reinterpret_cast<PFN_vkAllocateDescriptorSets>(dlsym(g_real_vulkan, "vkAllocateDescriptorSets"));
-    }
     return malicompat::VulkanDescriptorShim::Instance().InterceptAllocateDescriptorSets(
-        device, pAllocateInfo, pDescriptorSets, g_real_vkAllocateDescriptorSets);
+        device, pAllocateInfo, pDescriptorSets, g_vendor_vkAllocateDescriptorSets);
 }
 
 VKAPI_ATTR void VKAPI_CALL malicompat_vkUpdateDescriptorSets(
@@ -504,11 +488,8 @@ VKAPI_ATTR void VKAPI_CALL malicompat_vkUpdateDescriptorSets(
     uint32_t descriptorCopyCount,
     const VkCopyDescriptorSet* pDescriptorCopies) {
     InitRealVulkan();
-    if (!g_real_vkUpdateDescriptorSets && g_real_vulkan) {
-        g_real_vkUpdateDescriptorSets = reinterpret_cast<PFN_vkUpdateDescriptorSets>(dlsym(g_real_vulkan, "vkUpdateDescriptorSets"));
-    }
     malicompat::VulkanDescriptorShim::Instance().InterceptUpdateDescriptorSets(
-        device, descriptorWriteCount, pDescriptorWrites, descriptorCopyCount, pDescriptorCopies, g_real_vkUpdateDescriptorSets);
+        device, descriptorWriteCount, pDescriptorWrites, descriptorCopyCount, pDescriptorCopies, g_vendor_vkUpdateDescriptorSets);
 }
 
 VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdBindDescriptorSets(
@@ -521,11 +502,8 @@ VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdBindDescriptorSets(
     uint32_t dynamicOffsetCount,
     const uint32_t* pDynamicOffsets) {
     InitRealVulkan();
-    if (!g_real_vkCmdBindDescriptorSets && g_real_vulkan) {
-        g_real_vkCmdBindDescriptorSets = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(dlsym(g_real_vulkan, "vkCmdBindDescriptorSets"));
-    }
     malicompat::VulkanDescriptorShim::Instance().InterceptCmdBindDescriptorSets(
-        commandBuffer, pipelineBindPoint, layout, firstSet, descriptorSetCount, pDescriptorSets, dynamicOffsetCount, pDynamicOffsets, g_real_vkCmdBindDescriptorSets);
+        commandBuffer, pipelineBindPoint, layout, firstSet, descriptorSetCount, pDescriptorSets, dynamicOffsetCount, pDynamicOffsets, g_vendor_vkCmdBindDescriptorSets);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateQueryPool(
@@ -542,11 +520,8 @@ VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateQueryPool(
         return VK_SUCCESS;
     }
 
-    if (!g_real_vkCreateQueryPool && g_real_vulkan) {
-        g_real_vkCreateQueryPool = reinterpret_cast<PFN_vkCreateQueryPool>(dlsym(g_real_vulkan, "vkCreateQueryPool"));
-    }
-    if (g_real_vkCreateQueryPool) {
-        return g_real_vkCreateQueryPool(device, pCreateInfo, pAllocator, pQueryPool);
+    if (g_vendor_vkCreateQueryPool) {
+        return g_vendor_vkCreateQueryPool(device, pCreateInfo, pAllocator, pQueryPool);
     }
     return VK_SUCCESS;
 }
@@ -578,8 +553,8 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstan
     if (g_vendor_device && g_vendor_device->CreateInstance) {
         return g_vendor_device->CreateInstance(pCreateInfo, pAllocator, pInstance);
     }
-    if (g_real_vkCreateInstance) {
-        return g_real_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+    if (g_vendor_vkCreateInstance) {
+        return g_vendor_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
     }
     return VK_ERROR_INITIALIZATION_FAILED;
 }
