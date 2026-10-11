@@ -429,15 +429,19 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
     if (std::strcmp(pName, "vkCmdBindDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdBindDescriptorSets);
     if (std::strcmp(pName, "vkCreateQueryPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateQueryPool);
 
+    PFN_vkVoidFunction pfn = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
-        auto pfn = g_vendor_device->GetInstanceProcAddr(instance, pName);
-        if (pfn) return pfn;
+        pfn = g_vendor_device->GetInstanceProcAddr(instance, pName);
     }
-    if (g_vendor_vulkan) {
-        auto pfn = reinterpret_cast<PFN_vkVoidFunction>(dlsym(g_vendor_vulkan, pName));
-        if (pfn) return pfn;
+    if (!pfn && g_vendor_vulkan) {
+        pfn = reinterpret_cast<PFN_vkVoidFunction>(dlsym(g_vendor_vulkan, pName));
     }
-    return nullptr;
+    if (!pfn) {
+        LOGW("GetInstanceProcAddr: '%s' NOT FOUND in vendor driver", pName);
+    } else {
+        LOGI("GetInstanceProcAddr: '%s' -> %p", pName, pfn);
+    }
+    return pfn;
 }
 
 MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
@@ -451,15 +455,19 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
     if (std::strcmp(pName, "vkCmdBindDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdBindDescriptorSets);
     if (std::strcmp(pName, "vkCreateQueryPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateQueryPool);
 
+    PFN_vkVoidFunction pfn = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
-        auto pfn = g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, pName);
-        if (pfn) return pfn;
+        pfn = g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, pName);
     }
-    if (g_vendor_vulkan) {
-        auto pfn = reinterpret_cast<PFN_vkVoidFunction>(dlsym(g_vendor_vulkan, pName));
-        if (pfn) return pfn;
+    if (!pfn && g_vendor_vulkan) {
+        pfn = reinterpret_cast<PFN_vkVoidFunction>(dlsym(g_vendor_vulkan, pName));
     }
-    return nullptr;
+    if (!pfn) {
+        LOGW("GetDeviceProcAddr: '%s' NOT FOUND in vendor driver", pName);
+    } else {
+        LOGI("GetDeviceProcAddr: '%s' -> %p", pName, pfn);
+    }
+    return pfn;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDescriptorSetLayout(
