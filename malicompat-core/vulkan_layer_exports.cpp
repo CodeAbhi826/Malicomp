@@ -8,6 +8,7 @@
 
 #define LOG_TAG "MaliCompat"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
@@ -35,10 +36,13 @@ void InitRealVulkan() {
             g_real_vkGetDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(dlsym(g_real_vulkan, "vkGetDeviceProcAddr"));
         }
         
-        // Also open vendor HAL library directly to forward HMI module metadata
+        // Also open vendor HAL library directly to forward HMI module metadata and device entry points
         g_vendor_vulkan = dlopen("/vendor/lib64/hw/vulkan.universal7884B.so", RTLD_NOW | RTLD_LOCAL);
         if (!g_vendor_vulkan) {
             g_vendor_vulkan = dlopen("/vendor/lib64/hw/vulkan.universal7904.so", RTLD_NOW | RTLD_LOCAL);
+        }
+        if (!g_vendor_vulkan) {
+            g_vendor_vulkan = dlopen("/vendor/lib64/egl/libGLES_mali.so", RTLD_NOW | RTLD_LOCAL);
         }
 
         LOGI("Initialized MaliCompat: real libvulkan=%p, vendor HAL=%p", g_real_vulkan, g_vendor_vulkan);
@@ -47,26 +51,142 @@ void InitRealVulkan() {
 
 } // namespace
 
-extern "C" {
+// Standard Android HAL type definitions
+#define HARDWARE_MODULE_TAG 0x48574d54 // ('H' 'W' 'M' 'T')
+#define HARDWARE_DEVICE_TAG 0x48574454 // ('H' 'W' 'D' 'T')
 
-// Android HAL Module Information symbol required by Android Vulkan loader when loaded via adrenotools
-__attribute__((visibility("default"), used)) struct hw_module_t {
+struct hw_module_t;
+struct hw_device_t;
+
+struct hw_module_methods_t {
+    int (*open)(const struct hw_module_t* module, const char* id, struct hw_device_t** device);
+};
+
+struct hw_module_t {
     uint32_t tag;
     uint16_t module_api_version;
     uint16_t hal_api_version;
     const char* id;
     const char* name;
     const char* author;
+    struct hw_module_methods_t* methods;
     void* dso;
-    uint8_t reserved[128];
-} HMI = {
-    0x444d4f48, // HARDWARE_MODULE_TAG ('H' 'O' 'M' 'D')
-    1, 0,
-    "vulkan",
-    "MaliCompat Vulkan Translation Shim",
-    "CodeAbhi826",
-    nullptr,
-    {0}
+#ifdef __LP64__
+    uint64_t reserved[32 - 7];
+#else
+    uint32_t reserved[32 - 7];
+#endif
+};
+
+struct hw_device_t {
+    uint32_t tag;
+    uint32_t version;
+    struct hw_module_t* module;
+    uint32_t reserved[12];
+    int (*close)(struct hw_device_t* device);
+};
+
+struct hwvulkan_device_t {
+    struct hw_device_t common;
+    PFN_vkEnumerateInstanceExtensionProperties EnumerateInstanceExtensionProperties;
+    PFN_vkCreateInstance CreateInstance;
+    PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
+};
+
+// Forward declaration
+extern "C" {
+__attribute__((visibility("default"), used)) hw_module_t HMI;
+}
+
+namespace {
+
+static hwvulkan_device_t g_malicompat_device;
+
+static int malicompat_device_close(struct hw_device_t* /*device*/) {
+    return 0;
+}
+
+static VkResult VKAPI_CALL malicompat_hal_EnumerateInstanceExtensionProperties(
+    const char* pLayerName,
+    uint32_t* pPropertyCount,
+    VkExtensionProperties* pProperties) {
+    InitRealVulkan();
+    if (g_real_vulkan) {
+        auto pfn = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
+            dlsym(g_real_vulkan, "vkEnumerateInstanceExtensionProperties"));
+        if (pfn) return pfn(pLayerName, pPropertyCount, pProperties);
+    }
+    return VK_SUCCESS;
+}
+
+static VkResult VKAPI_CALL malicompat_hal_CreateInstance(
+    const VkInstanceCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkInstance* pInstance) {
+    InitRealVulkan();
+    if (g_real_vkGetInstanceProcAddr) {
+        auto pfn = reinterpret_cast<PFN_vkCreateInstance>(
+            g_real_vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance"));
+        if (pfn) return pfn(pCreateInfo, pAllocator, pInstance);
+    }
+    return VK_ERROR_INITIALIZATION_FAILED;
+}
+
+static int malicompat_hal_open(const struct hw_module_t* module, const char* id, struct hw_device_t** device) {
+    LOGI("MaliCompat HAL open called: id=%s", id ? id : "null");
+    InitRealVulkan();
+
+    // If vendor HAL is available, try delegating open to vendor module first
+    if (g_vendor_vulkan) {
+        auto* vendor_hmi = reinterpret_cast<hw_module_t*>(dlsym(g_vendor_vulkan, "HMI"));
+        if (vendor_hmi && vendor_hmi->methods && vendor_hmi->methods->open) {
+            LOGI("Forwarding HAL open to vendor HMI (%p)", vendor_hmi);
+            int res = vendor_hmi->methods->open(vendor_hmi, id, device);
+            if (res == 0 && device && *device) {
+                LOGI("Vendor HAL open succeeded: device=%p", *device);
+                // Intercept GetInstanceProcAddr on the returned hwvulkan_device_t
+                auto* vulkan_dev = reinterpret_cast<hwvulkan_device_t*>(*device);
+                vulkan_dev->GetInstanceProcAddr = malicompat_vkGetInstanceProcAddr;
+                return 0;
+            }
+            LOGW("Vendor HAL open returned %d, falling back to internal device", res);
+        }
+    }
+
+    // Fallback: populate internal hwvulkan_device_t
+    std::memset(&g_malicompat_device, 0, sizeof(g_malicompat_device));
+    g_malicompat_device.common.tag = HARDWARE_DEVICE_TAG;
+    g_malicompat_device.common.version = 0;
+    g_malicompat_device.common.module = const_cast<hw_module_t*>(module);
+    g_malicompat_device.common.close = malicompat_device_close;
+    g_malicompat_device.EnumerateInstanceExtensionProperties = malicompat_hal_EnumerateInstanceExtensionProperties;
+    g_malicompat_device.CreateInstance = malicompat_hal_CreateInstance;
+    g_malicompat_device.GetInstanceProcAddr = malicompat_vkGetInstanceProcAddr;
+
+    *device = &g_malicompat_device.common;
+    LOGI("MaliCompat fallback HAL device returned: %p", *device);
+    return 0;
+}
+
+static hw_module_methods_t g_malicompat_methods = {
+    .open = malicompat_hal_open
+};
+
+} // namespace
+
+extern "C" {
+
+// Android HAL Module Information symbol required by Android Vulkan loader when loaded via adrenotools
+__attribute__((visibility("default"), used)) hw_module_t HMI = {
+    .tag = HARDWARE_MODULE_TAG,
+    .module_api_version = 1,
+    .hal_api_version = 0,
+    .id = "vulkan",
+    .name = "MaliCompat Vulkan Translation Shim",
+    .author = "CodeAbhi826",
+    .methods = &g_malicompat_methods,
+    .dso = nullptr,
+    .reserved = {0}
 };
 
 VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatures2(
