@@ -11,3 +11,5 @@ dist/
 extracted_apk/
 *.so
 .cache/
+__pycache__/
+reports/

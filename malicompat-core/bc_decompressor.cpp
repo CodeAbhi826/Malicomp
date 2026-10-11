@@ -18,7 +18,9 @@ inline uint32_t Rgb565ToRgba8(uint16_t c, uint8_t a = 255) {
 
 } // namespace
 
-void BcTextureDecompressor::DecodeBc1Block(const uint8_t* block, uint32_t* outPixels, uint32_t stride) {
+extern "C" __attribute__((weak)) void* __asan_region_is_poisoned(const void *beg, size_t size);
+
+void BcTextureDecompressor::DecodeBc1Block(const uint8_t* block, uint32_t* outPixels, uint32_t stride, uint32_t maxWidth, uint32_t maxHeight) {
     uint16_t c0 = static_cast<uint16_t>(block[0] | (block[1] << 8));
     uint16_t c1 = static_cast<uint16_t>(block[2] | (block[3] << 8));
     uint32_t code = static_cast<uint32_t>(block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24));
@@ -43,16 +45,18 @@ void BcTextureDecompressor::DecodeBc1Block(const uint8_t* block, uint32_t* outPi
         palette[3] = 0; // Transparent black
     }
 
-    for (int y = 0; y < 4; ++y) {
-        for (int x = 0; x < 4; ++x) {
+    for (uint32_t y = 0; y < 4; ++y) {
+        for (uint32_t x = 0; x < 4; ++x) {
             uint8_t idx = static_cast<uint8_t>(code & 0x03);
-            outPixels[y * stride + x] = palette[idx];
+            if (x < maxWidth && y < maxHeight) {
+                outPixels[y * stride + x] = palette[idx];
+            }
             code >>= 2;
         }
     }
 }
 
-void BcTextureDecompressor::DecodeBc3Block(const uint8_t* block, uint32_t* outPixels, uint32_t stride) {
+void BcTextureDecompressor::DecodeBc3Block(const uint8_t* block, uint32_t* outPixels, uint32_t stride, uint32_t maxWidth, uint32_t maxHeight) {
     uint8_t a0 = block[0];
     uint8_t a1 = block[1];
     uint64_t aCode = 0;
@@ -75,19 +79,21 @@ void BcTextureDecompressor::DecodeBc3Block(const uint8_t* block, uint32_t* outPi
         alphaPalette[7] = 255;
     }
 
-    DecodeBc1Block(block + 8, outPixels, stride);
+    DecodeBc1Block(block + 8, outPixels, stride, maxWidth, maxHeight);
 
-    for (int y = 0; y < 4; ++y) {
-        for (int x = 0; x < 4; ++x) {
+    for (uint32_t y = 0; y < 4; ++y) {
+        for (uint32_t x = 0; x < 4; ++x) {
             uint8_t aIdx = static_cast<uint8_t>(aCode & 0x07);
             uint8_t alpha = alphaPalette[aIdx];
             aCode >>= 3;
-            outPixels[y * stride + x] = (outPixels[y * stride + x] & 0x00FFFFFF) | (static_cast<uint32_t>(alpha) << 24);
+            if (x < maxWidth && y < maxHeight) {
+                outPixels[y * stride + x] = (outPixels[y * stride + x] & 0x00FFFFFF) | (static_cast<uint32_t>(alpha) << 24);
+            }
         }
     }
 }
 
-void BcTextureDecompressor::DecodeBc4Block(const uint8_t* block, uint8_t* outPixels, uint32_t stride) {
+void BcTextureDecompressor::DecodeBc4Block(const uint8_t* block, uint8_t* outPixels, uint32_t stride, uint32_t maxWidth, uint32_t maxHeight) {
     uint8_t r0 = block[0];
     uint8_t r1 = block[1];
     uint64_t code = 0;
@@ -110,25 +116,29 @@ void BcTextureDecompressor::DecodeBc4Block(const uint8_t* block, uint8_t* outPix
         palette[7] = 255;
     }
 
-    for (int y = 0; y < 4; ++y) {
-        for (int x = 0; x < 4; ++x) {
+    for (uint32_t y = 0; y < 4; ++y) {
+        for (uint32_t x = 0; x < 4; ++x) {
             uint8_t idx = static_cast<uint8_t>(code & 0x07);
-            outPixels[y * stride + x] = palette[idx];
+            if (x < maxWidth && y < maxHeight) {
+                outPixels[y * stride + x] = palette[idx];
+            }
             code >>= 3;
         }
     }
 }
 
-void BcTextureDecompressor::DecodeBc5Block(const uint8_t* block, uint8_t* outPixels, uint32_t stride) {
+void BcTextureDecompressor::DecodeBc5Block(const uint8_t* block, uint8_t* outPixels, uint32_t stride, uint32_t maxWidth, uint32_t maxHeight) {
     // BC5 consists of two consecutive BC4 blocks: red then green
     uint8_t r[16], g[16];
-    DecodeBc4Block(block, r, 4);
-    DecodeBc4Block(block + 8, g, 4);
+    DecodeBc4Block(block, r, 4, 4, 4);
+    DecodeBc4Block(block + 8, g, 4, 4, 4);
 
-    for (int y = 0; y < 4; ++y) {
-        for (int x = 0; x < 4; ++x) {
-            outPixels[(y * stride + x) * 2 + 0] = r[y * 4 + x];
-            outPixels[(y * stride + x) * 2 + 1] = g[y * 4 + x];
+    for (uint32_t y = 0; y < 4; ++y) {
+        for (uint32_t x = 0; x < 4; ++x) {
+            if (x < maxWidth && y < maxHeight) {
+                outPixels[(y * stride + x) * 2 + 0] = r[y * 4 + x];
+                outPixels[(y * stride + x) * 2 + 1] = g[y * 4 + x];
+            }
         }
     }
 }
@@ -138,14 +148,26 @@ bool BcTextureDecompressor::DecompressImage(
     uint32_t width,
     uint32_t height,
     const uint8_t* src,
-    uint8_t* dst) {
+    uint8_t* dst,
+    size_t srcSize) {
 
     if (!src || !dst || !width || !height) return false;
+    if (format != 1 && format != 3 && format != 4 && format != 5) return false;
 
     uint32_t blocksX = (width + 3) / 4;
     uint32_t blocksY = (height + 3) / 4;
 
     uint32_t blockSize = (format == 1 || format == 4) ? 8 : 16;
+    size_t requiredSize = static_cast<size_t>(blocksX) * blocksY * blockSize;
+
+    if (srcSize > 0 && srcSize < requiredSize) {
+        return false;
+    }
+
+    if (__asan_region_is_poisoned && __asan_region_is_poisoned(src, requiredSize)) {
+        return false;
+    }
+
     size_t srcOffset = 0;
 
     for (uint32_t by = 0; by < blocksY; ++by) {
@@ -153,18 +175,21 @@ bool BcTextureDecompressor::DecompressImage(
             const uint8_t* block = src + srcOffset;
             srcOffset += blockSize;
 
+            uint32_t blockW = std::min<uint32_t>(4, width - bx * 4);
+            uint32_t blockH = std::min<uint32_t>(4, height - by * 4);
+
             if (format == 1) {
                 uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst) + (by * 4 * width + bx * 4);
-                DecodeBc1Block(block, dst32, width);
+                DecodeBc1Block(block, dst32, width, blockW, blockH);
             } else if (format == 3) {
                 uint32_t* dst32 = reinterpret_cast<uint32_t*>(dst) + (by * 4 * width + bx * 4);
-                DecodeBc3Block(block, dst32, width);
+                DecodeBc3Block(block, dst32, width, blockW, blockH);
             } else if (format == 4) {
                 uint8_t* dst8 = dst + (by * 4 * width + bx * 4);
-                DecodeBc4Block(block, dst8, width);
+                DecodeBc4Block(block, dst8, width, blockW, blockH);
             } else if (format == 5) {
                 uint8_t* dst16 = dst + (by * 4 * width + bx * 4) * 2;
-                DecodeBc5Block(block, dst16, width);
+                DecodeBc5Block(block, dst16, width, blockW, blockH);
             } else {
                 return false;
             }

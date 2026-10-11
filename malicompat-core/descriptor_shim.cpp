@@ -409,6 +409,15 @@ void VulkanDescriptorShim::InterceptUpdateDescriptorSets(
 
     if (!realFunc) return;
 
+    if (descriptorWriteCount > 0 && !pDescriptorWrites) {
+        LOGE("InterceptUpdateDescriptorSets: pDescriptorWrites is NULL with descriptorWriteCount > 0");
+        return;
+    }
+    if (descriptorCopyCount > 0 && !pDescriptorCopies) {
+        LOGE("InterceptUpdateDescriptorSets: pDescriptorCopies is NULL with descriptorCopyCount > 0");
+        return;
+    }
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (uint32_t i = 0; i < descriptorWriteCount; ++i) {

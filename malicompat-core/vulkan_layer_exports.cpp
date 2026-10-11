@@ -415,8 +415,9 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
     pFeatures->features.fillModeNonSolid = VK_TRUE;
 
     // Intercept pNext chain to expose emulated descriptor indexing features (F2)
+    uint32_t depth = 0;
     auto* next = reinterpret_cast<VkBaseOutStructure*>(pFeatures->pNext);
-    while (next) {
+    while (next && depth++ < 64) {
         if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES) {
             auto* indexing = reinterpret_cast<VkPhysicalDeviceDescriptorIndexingFeatures*>(next);
             indexing->shaderInputAttachmentArrayDynamicIndexing = VK_TRUE;
@@ -505,8 +506,9 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDevicePrope
     }
 
     // Intercept pNext chain to expose spoofed descriptor indexing limits (F3)
+    uint32_t depth = 0;
     auto* next = reinterpret_cast<VkBaseOutStructure*>(pProperties->pNext);
-    while (next) {
+    while (next && depth++ < 64) {
         if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES) {
             auto* props = reinterpret_cast<VkPhysicalDeviceDescriptorIndexingProperties*>(next);
             props->maxUpdateAfterBindDescriptorsInAllPools = 1048576;
@@ -630,17 +632,27 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
 
     if (!pCreateInfo) return VK_ERROR_INITIALIZATION_FAILED;
 
+    // Gracefully reject null extension array when extension count > 0
+    if (pCreateInfo->enabledExtensionCount > 0 && !pCreateInfo->ppEnabledExtensionNames) {
+        LOGE("vkCreateDevice: enabledExtensionCount > 0 but ppEnabledExtensionNames is NULL");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
     VkDeviceCreateInfo modifiedCreateInfo = *pCreateInfo;
 
     // 1. Filter out VK_EXT_descriptor_indexing from enabled extensions for vendor driver (F4)
     std::vector<const char*> filteredExtensions;
-    for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
-        const char* ext = pCreateInfo->ppEnabledExtensionNames[i];
-        if (ext && std::strcmp(ext, "VK_EXT_descriptor_indexing") == 0) {
-            LOGI("Filtering out unsupported VK_EXT_descriptor_indexing from vendor vkCreateDevice");
-            continue;
+    if (pCreateInfo->ppEnabledExtensionNames) {
+        for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+            const char* ext = pCreateInfo->ppEnabledExtensionNames[i];
+            if (ext && std::strcmp(ext, "VK_EXT_descriptor_indexing") == 0) {
+                LOGI("Filtering out unsupported VK_EXT_descriptor_indexing from vendor vkCreateDevice");
+                continue;
+            }
+            if (ext) {
+                filteredExtensions.push_back(ext);
+            }
         }
-        filteredExtensions.push_back(ext);
     }
     modifiedCreateInfo.enabledExtensionCount = static_cast<uint32_t>(filteredExtensions.size());
     modifiedCreateInfo.ppEnabledExtensionNames = filteredExtensions.data();
@@ -661,57 +673,50 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
     }
 
     // 3. Unlink indexing feature structs from pNext and sanitize features (F4)
+    // Never mutate caller memory or read-only pCreateInfo->pNext directly with const_cast.
+    // Build local sanitized copies.
     auto shouldStrip = [](VkStructureType sType) -> bool {
         return sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES ||
                sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     };
 
-    VkBaseOutStructure* prev = nullptr;
-    auto* cur = reinterpret_cast<VkBaseOutStructure*>(const_cast<void*>(pCreateInfo->pNext));
-    VkBaseOutStructure* newHead = cur;
+    constexpr uint32_t kMaxPNextDepth = 64;
 
-    while (cur) {
-        if (cur->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2) {
-            auto* f2 = reinterpret_cast<VkPhysicalDeviceFeatures2*>(cur);
-            f2->features.vertexPipelineStoresAndAtomics = VK_FALSE;
-            f2->features.fillModeNonSolid = VK_FALSE;
-            LOGI("Cleared unsupported vertexPipelineStoresAndAtomics / fillModeNonSolid in VkPhysicalDeviceFeatures2");
+    VkPhysicalDeviceFeatures2 localFeatures2{};
 
-            // Sanitize nested pNext in VkPhysicalDeviceFeatures2
-            VkBaseOutStructure* f2_prev = nullptr;
-            auto* f2_cur = reinterpret_cast<VkBaseOutStructure*>(f2->pNext);
-            VkBaseOutStructure* f2_newHead = f2_cur;
-            while (f2_cur) {
-                if (shouldStrip(f2_cur->sType)) {
-                    LOGI("Unlinking indexing feature struct (sType=%d) from VkPhysicalDeviceFeatures2 pNext", f2_cur->sType);
-                    if (f2_prev) {
-                        f2_prev->pNext = f2_cur->pNext;
-                    } else {
-                        f2_newHead = f2_cur->pNext;
-                    }
-                    f2_cur = f2_cur->pNext;
-                    continue;
-                }
-                f2_prev = f2_cur;
-                f2_cur = f2_cur->pNext;
-            }
-            f2->pNext = f2_newHead;
-        }
-
-        if (shouldStrip(cur->sType)) {
-            LOGI("Unlinking indexing feature struct (sType=%d) from vendor vkCreateDevice pNext", cur->sType);
-            if (prev) {
-                prev->pNext = cur->pNext;
-            } else {
-                newHead = cur->pNext;
-            }
-            cur = cur->pNext;
-            continue;
-        }
-        prev = cur;
+    uint32_t rootDepth = 0;
+    const auto* cur = reinterpret_cast<const VkBaseInStructure*>(pCreateInfo->pNext);
+    while (cur && rootDepth++ < kMaxPNextDepth && shouldStrip(cur->sType)) {
+        LOGI("Unlinking indexing feature struct (sType=%d) from vendor vkCreateDevice pNext", cur->sType);
         cur = cur->pNext;
     }
-    modifiedCreateInfo.pNext = newHead;
+
+    if (!cur || rootDepth >= kMaxPNextDepth) {
+        modifiedCreateInfo.pNext = nullptr;
+    } else if (cur->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2) {
+        localFeatures2 = *reinterpret_cast<const VkPhysicalDeviceFeatures2*>(cur);
+        localFeatures2.features.vertexPipelineStoresAndAtomics = VK_FALSE;
+        localFeatures2.features.fillModeNonSolid = VK_FALSE;
+        LOGI("Sanitized unsupported vertexPipelineStoresAndAtomics / fillModeNonSolid in local VkPhysicalDeviceFeatures2 copy");
+
+        // Sanitize nested pNext in localFeatures2
+        uint32_t f2_depth = 0;
+        const auto* f2_cur = reinterpret_cast<const VkBaseInStructure*>(localFeatures2.pNext);
+        while (f2_cur && f2_depth++ < kMaxPNextDepth && shouldStrip(f2_cur->sType)) {
+            LOGI("Unlinking indexing feature struct (sType=%d) from local VkPhysicalDeviceFeatures2 copy pNext", f2_cur->sType);
+            f2_cur = f2_cur->pNext;
+        }
+
+        if (!f2_cur || f2_depth >= kMaxPNextDepth) {
+            localFeatures2.pNext = nullptr;
+        } else {
+            localFeatures2.pNext = const_cast<void*>(static_cast<const void*>(f2_cur));
+        }
+
+        modifiedCreateInfo.pNext = &localFeatures2;
+    } else {
+        modifiedCreateInfo.pNext = const_cast<void*>(static_cast<const void*>(cur));
+    }
 
     PFN_vkCreateDevice realCreate = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
