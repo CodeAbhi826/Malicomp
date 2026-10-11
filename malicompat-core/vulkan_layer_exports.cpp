@@ -24,25 +24,50 @@ PFN_vkCreateQueryPool g_real_vkCreateQueryPool = nullptr;
 PFN_vkGetPhysicalDeviceFeatures2 g_real_vkGetPhysicalDeviceFeatures2 = nullptr;
 
 std::once_flag g_init_flag;
+void* g_vendor_vulkan = nullptr;
 
 void InitRealVulkan() {
     std::call_once(g_init_flag, []() {
+        // Try system libvulkan first
         g_real_vulkan = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
         if (g_real_vulkan) {
             g_real_vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(g_real_vulkan, "vkGetInstanceProcAddr"));
             g_real_vkGetDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(dlsym(g_real_vulkan, "vkGetDeviceProcAddr"));
-            g_real_vkCreateDescriptorSetLayout = reinterpret_cast<PFN_vkCreateDescriptorSetLayout>(dlsym(g_real_vulkan, "vkCreateDescriptorSetLayout"));
-            g_real_vkAllocateDescriptorSets = reinterpret_cast<PFN_vkAllocateDescriptorSets>(dlsym(g_real_vulkan, "vkAllocateDescriptorSets"));
-            g_real_vkUpdateDescriptorSets = reinterpret_cast<PFN_vkUpdateDescriptorSets>(dlsym(g_real_vulkan, "vkUpdateDescriptorSets"));
-            g_real_vkCmdBindDescriptorSets = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(dlsym(g_real_vulkan, "vkCmdBindDescriptorSets"));
-            g_real_vkCreateQueryPool = reinterpret_cast<PFN_vkCreateQueryPool>(dlsym(g_real_vulkan, "vkCreateQueryPool"));
-            g_real_vkGetPhysicalDeviceFeatures2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(dlsym(g_real_vulkan, "vkGetPhysicalDeviceFeatures2"));
-            LOGI("Initialized MaliCompat layer with real libvulkan.so");
-        } else {
-            LOGE("Failed to open real libvulkan.so: %s", dlerror());
         }
+        
+        // Also open vendor HAL library directly to forward HMI module metadata
+        g_vendor_vulkan = dlopen("/vendor/lib64/hw/vulkan.universal7884B.so", RTLD_NOW | RTLD_LOCAL);
+        if (!g_vendor_vulkan) {
+            g_vendor_vulkan = dlopen("/vendor/lib64/hw/vulkan.universal7904.so", RTLD_NOW | RTLD_LOCAL);
+        }
+
+        LOGI("Initialized MaliCompat: real libvulkan=%p, vendor HAL=%p", g_real_vulkan, g_vendor_vulkan);
     });
 }
+
+} // namespace
+
+extern "C" {
+
+// Android HAL Module Information symbol required by Android Vulkan loader when loaded via adrenotools
+__attribute__((visibility("default"))) struct {
+    uint32_t tag;
+    uint16_t module_api_version;
+    uint16_t hal_api_version;
+    const char* id;
+    const char* name;
+    const char* author;
+    void* dso;
+    uint8_t reserved[128];
+} HMI = {
+    0x444d4f48, // HARDWARE_MODULE_TAG ('H' 'O' 'M' 'D')
+    1, 0,
+    "vulkan",
+    "MaliCompat Vulkan Translation Shim",
+    "CodeAbhi826",
+    nullptr,
+    {0}
+};
 
 } // namespace
 
