@@ -23,6 +23,7 @@ PFN_vkUpdateDescriptorSets g_real_vkUpdateDescriptorSets = nullptr;
 PFN_vkCmdBindDescriptorSets g_real_vkCmdBindDescriptorSets = nullptr;
 PFN_vkCreateQueryPool g_real_vkCreateQueryPool = nullptr;
 PFN_vkGetPhysicalDeviceFeatures2 g_real_vkGetPhysicalDeviceFeatures2 = nullptr;
+PFN_vkEnumerateDeviceExtensionProperties g_real_vkEnumerateDeviceExtensionProperties = nullptr;
 
 std::once_flag g_init_flag;
 void* g_vendor_vulkan = nullptr;
@@ -34,6 +35,8 @@ void InitRealVulkan() {
         if (g_real_vulkan) {
             g_real_vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(g_real_vulkan, "vkGetInstanceProcAddr"));
             g_real_vkGetDeviceProcAddr = reinterpret_cast<PFN_vkGetDeviceProcAddr>(dlsym(g_real_vulkan, "vkGetDeviceProcAddr"));
+            g_real_vkGetPhysicalDeviceFeatures2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(dlsym(g_real_vulkan, "vkGetPhysicalDeviceFeatures2"));
+            g_real_vkEnumerateDeviceExtensionProperties = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(dlsym(g_real_vulkan, "vkEnumerateDeviceExtensionProperties"));
         }
         
         // Also open vendor HAL library directly to forward HMI module metadata and device entry points
@@ -215,6 +218,62 @@ VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatures2(
     }
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkEnumerateDeviceExtensionProperties(
+    VkPhysicalDevice physicalDevice,
+    const char* pLayerName,
+    uint32_t* pPropertyCount,
+    VkExtensionProperties* pProperties) {
+    InitRealVulkan();
+    if (!g_real_vkEnumerateDeviceExtensionProperties) {
+        if (g_real_vkGetInstanceProcAddr) {
+            g_real_vkEnumerateDeviceExtensionProperties = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+                g_real_vkGetInstanceProcAddr(nullptr, "vkEnumerateDeviceExtensionProperties"));
+        }
+        if (!g_real_vkEnumerateDeviceExtensionProperties && g_real_vulkan) {
+            g_real_vkEnumerateDeviceExtensionProperties = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+                dlsym(g_real_vulkan, "vkEnumerateDeviceExtensionProperties"));
+        }
+    }
+
+    if (!pProperties) {
+        uint32_t count = 0;
+        VkResult res = VK_SUCCESS;
+        if (g_real_vkEnumerateDeviceExtensionProperties) {
+            res = g_real_vkEnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &count, nullptr);
+        }
+        if (res == VK_SUCCESS || res == VK_INCOMPLETE) {
+            *pPropertyCount = count + 1;
+        } else {
+            *pPropertyCount = count;
+        }
+        return res;
+    }
+
+    uint32_t capacity = *pPropertyCount;
+    uint32_t real_count = capacity;
+    VkResult res = VK_SUCCESS;
+    if (g_real_vkEnumerateDeviceExtensionProperties) {
+        res = g_real_vkEnumerateDeviceExtensionProperties(physicalDevice, pLayerName, &real_count, pProperties);
+    }
+
+    bool found = false;
+    for (uint32_t i = 0; i < real_count; ++i) {
+        if (std::strcmp(pProperties[i].extensionName, "VK_EXT_descriptor_indexing") == 0) {
+            found = true;
+            break;
+        }
+    }
+
+    if (!found && real_count < capacity) {
+        std::strncpy(pProperties[real_count].extensionName, "VK_EXT_descriptor_indexing", VK_MAX_EXTENSION_NAME_SIZE);
+        pProperties[real_count].specVersion = 2;
+        real_count++;
+        LOGI("Appended emulated VK_EXT_descriptor_indexing to device extensions list");
+    }
+    *pPropertyCount = real_count;
+    return res;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     InitRealVulkan();
     if (!pName) return nullptr;
@@ -225,6 +284,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInstanceProcAddr(VkInst
     if (std::strcmp(pName, "vkCmdBindDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdBindDescriptorSets);
     if (std::strcmp(pName, "vkCreateQueryPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateQueryPool);
     if (std::strcmp(pName, "vkGetPhysicalDeviceFeatures2") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetPhysicalDeviceFeatures2);
+    if (std::strcmp(pName, "vkEnumerateDeviceExtensionProperties") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkEnumerateDeviceExtensionProperties);
 
     if (g_real_vkGetInstanceProcAddr) {
         return g_real_vkGetInstanceProcAddr(instance, pName);
@@ -241,6 +301,8 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDeviceProcAddr(VkDevice
     if (std::strcmp(pName, "vkUpdateDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkUpdateDescriptorSets);
     if (std::strcmp(pName, "vkCmdBindDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdBindDescriptorSets);
     if (std::strcmp(pName, "vkCreateQueryPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateQueryPool);
+    if (std::strcmp(pName, "vkGetPhysicalDeviceFeatures2") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetPhysicalDeviceFeatures2);
+    if (std::strcmp(pName, "vkEnumerateDeviceExtensionProperties") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkEnumerateDeviceExtensionProperties);
 
     if (g_real_vkGetDeviceProcAddr) {
         return g_real_vkGetDeviceProcAddr(device, pName);
@@ -357,6 +419,12 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(VkInstance instance, const VkAlloca
     InitRealVulkan();
     auto realDestroy = reinterpret_cast<PFN_vkDestroyInstance>(g_real_vkGetInstanceProcAddr(instance, "vkDestroyInstance"));
     if (realDestroy) realDestroy(instance, pAllocator);
+}
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2(VkPhysicalDevice d, VkPhysicalDeviceFeatures2* f) {
+    malicompat_vkGetPhysicalDeviceFeatures2(d, f);
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(VkPhysicalDevice d, const char* l, uint32_t* c, VkExtensionProperties* p) {
+    return malicompat_vkEnumerateDeviceExtensionProperties(d, l, c, p);
 }
 
 } // extern "C"
