@@ -27,3 +27,21 @@ endif()
 if(LOG_LIB)
     target_link_libraries(malicompat PRIVATE ${LOG_LIB})
 endif()
+
+# Standalone CLI probe tool for testing device capabilities without game dependencies
+add_executable(malicompat-probe
+    malicompat-probe/main.cpp
+)
+
+target_include_directories(malicompat-probe PRIVATE
+    malicompat-core
+)
+
+target_link_libraries(malicompat-probe PRIVATE
+    malicompat
+    dl
+)
+
+set_target_properties(malicompat-probe PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
