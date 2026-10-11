@@ -6,4 +6,8 @@
 build/
 bin/
 obj/
+dist/
+.agents/
+extracted_apk/
+*.so
 .cache/

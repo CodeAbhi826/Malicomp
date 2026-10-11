@@ -31,9 +31,34 @@ jobs:
             -DANDROID_PLATFORM=android-28 \
             -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build MaliCompat Core & Probe
+      - name: Build MaliCompat Core, Probe & Tests
         run: |
           cmake --build build-android --config Release -j$(nproc)
+
+      - name: Package Driver Bundle
+        run: |
+          mkdir -p build-android/bundle/payload
+          cp build-android/libmalicompat.so build-android/bundle/payload/
+          cp build-android/libmalicompat.so build-android/bundle/
+          cat << 'EOF' > build-android/bundle/driver.json
+          {"name":"MaliCompat-G71","libraryName":"libmalicompat.so","folder":"payload"}
+          EOF
+          cat << 'EOF' > build-android/bundle/meta.json
+          {
+            "schemaVersion": 1,
+            "name": "MaliCompat (Mali-G71)",
+            "description": "Vulkan translation shim for Mali Bifrost",
+            "author": "CodeAbhi826",
+            "packageVersion": "1",
+            "vendor": "MaliCompat",
+            "driverVersion": "1.0",
+            "minApi": 28,
+            "libraryName": "libmalicompat.so"
+          }
+          EOF
+          echo -n "libmalicompat.so" > build-android/bundle/.libreria
+          cp build-android/bundle/meta.json build-android/bundle/payload/meta.json
+          cd build-android/bundle && zip -r ../malicompat-g71.zip . && cd ../..
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -41,4 +66,6 @@ jobs:
           name: malicompat-arm64
           path: |
             build-android/*.so
+            build-android/*.zip
             build-android/bin/*
+          if-no-files-found: error
