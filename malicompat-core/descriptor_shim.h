@@ -8,12 +8,12 @@
 namespace malicompat {
 
 /**
- * DescriptorShimTable maintains shadow descriptor states.
+ * DescriptorShimTable maintains shadow descriptor states and fallback bindings.
  * 
  * When games attempt to bind descriptor sets with dynamic UPDATE_AFTER_BIND
  * or partial bindings on hardware that does not support them (like Mali-G71),
- * this table buffers descriptor writes and records them statically prior to
- * draw submissions.
+ * this table buffers descriptor writes, sanitizes layout/pool flags, and pre-binds
+ * 1x1 dummy 2D/Cube textures into unwritten slots to prevent GPU MMU page faults.
  */
 struct ShadowDescriptorBinding {
     VkDescriptorType type{};
@@ -28,11 +28,44 @@ struct ShadowDescriptorSet {
     std::unordered_map<uint32_t, ShadowDescriptorBinding> bindings;
 };
 
+struct CachedLayoutInfo {
+    VkDescriptorSetLayoutCreateInfo createInfo{};
+    std::vector<VkDescriptorSetLayoutBinding> bindings;
+};
+
+struct DeviceDummyResources {
+    VkImage image2D{VK_NULL_HANDLE};
+    VkDeviceMemory memory2D{VK_NULL_HANDLE};
+    VkImageView view2D{VK_NULL_HANDLE};
+
+    VkImage imageCube{VK_NULL_HANDLE};
+    VkDeviceMemory memoryCube{VK_NULL_HANDLE};
+    VkImageView viewCube{VK_NULL_HANDLE};
+
+    VkSampler sampler{VK_NULL_HANDLE};
+
+    VkBuffer buffer{VK_NULL_HANDLE};
+    VkDeviceMemory memoryBuffer{VK_NULL_HANDLE};
+
+    bool initialized{false};
+};
+
 class VulkanDescriptorShim {
 public:
     static VulkanDescriptorShim& Instance();
 
+    // Device lifecycle hooks for fallback resource allocation
+    void InitializeDeviceResources(VkDevice device, VkPhysicalDevice physicalDevice);
+    void CleanupDeviceResources(VkDevice device);
+
     // Hook entry points for Vulkan loader/driver interceptor
+    VkResult InterceptCreateDescriptorPool(
+        VkDevice device,
+        const VkDescriptorPoolCreateInfo* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
+        VkDescriptorPool* pDescriptorPool,
+        PFN_vkCreateDescriptorPool realFunc);
+
     VkResult InterceptCreateDescriptorSetLayout(
         VkDevice device,
         const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
@@ -67,9 +100,13 @@ public:
 
 private:
     VulkanDescriptorShim() = default;
+
+    uint32_t FindMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties);
+
     std::mutex mutex_;
     std::unordered_map<VkDescriptorSet, ShadowDescriptorSet> shadowSets_;
-    std::unordered_map<VkDescriptorSetLayout, VkDescriptorSetLayoutCreateInfo> layoutCache_;
+    std::unordered_map<VkDescriptorSetLayout, CachedLayoutInfo> layoutCache_;
+    std::unordered_map<VkDevice, DeviceDummyResources> deviceResources_;
 };
 
 } // namespace malicompat

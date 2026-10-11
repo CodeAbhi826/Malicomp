@@ -18,6 +18,7 @@ add_library(malicompat SHARED
     malicompat-core/vulkan_layer_exports.cpp
     malicompat-core/bc_decompressor.cpp
     malicompat-core/driver_archive_packer.cpp
+    malicompat-core/spirv_remapper.cpp
 )
 
 target_include_directories(malicompat PUBLIC
@@ -33,6 +34,10 @@ endif()
 
 if(LOG_LIB)
     target_link_libraries(malicompat PRIVATE ${LOG_LIB})
+endif()
+
+if(CMAKE_DL_LIBS)
+    target_link_libraries(malicompat PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
 # Standalone CLI probe tool for testing device capabilities without game dependencies

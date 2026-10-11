@@ -34,3 +34,15 @@
 All builds are compiled in the cloud using GitHub Actions for Android ARM64 (`arm64-v8a`) targeting API 28+:
 - **CI Workflow:** `.github/workflows/ci.yml`
 - **Compiler:** Clang NDK r27b with `-march=armv8-a` baseline enforcement.
+
+---
+
+## Attributions & Compliance
+
+All adapted techniques are attributed in `README.md`:
+- `codepdbh/nfsmw-android` & `codepdbh/NFS-CARBON-360-ANDROID-RECOMP` by Paulo Daniel Batuani Hurtado (GPL-3.0)
+- `victorgbd/NFSMW-Recompiled-Mobile` by victorgbd (GPL-3.0)
+- `FristOneRR/FristOneRR-Panvk-Driver` by FristOneRR (GPL-3.0 / MIT)
+- `leegao/bionic-vulkan-wrapper` by leegao (MIT)
+- Mesa 3D Graphics Library / PanVK by Collabora, Arm Ltd., and contributors (MIT)
+
