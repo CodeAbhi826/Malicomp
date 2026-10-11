@@ -95,7 +95,7 @@ struct hwvulkan_device_t {
 
 // Forward declaration
 extern "C" {
-__attribute__((visibility("default"), used)) hw_module_t HMI;
+extern hw_module_t HMI;
 }
 
 namespace {
