@@ -1,0 +1,14 @@
+target_arm64 = false
+target_x86_64 = false
+
+[renderer]
+backend = "vulkan"
+validation_layers = false
+
+[vulkan]
+max_bound_descriptor_sets = 4
+force_traditional_descriptors = true
+emulate_indexing = true
+disable_occlusion_queries = true
+cpu_bc_decompression = true
+dump_pipeline_cache = true

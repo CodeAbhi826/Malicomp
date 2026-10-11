@@ -1,0 +1,9 @@
+*.zip
+*.apk
+*.iso
+*.7z
+*.json
+build/
+bin/
+obj/
+.cache/
