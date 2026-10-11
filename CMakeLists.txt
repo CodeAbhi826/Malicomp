@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(malicompat SHARED
     malicompat-core/capability_analyzer.cpp
     malicompat-core/descriptor_virtualizer.cpp
+    malicompat-core/descriptor_shim.cpp
 )
 
 target_include_directories(malicompat PUBLIC
