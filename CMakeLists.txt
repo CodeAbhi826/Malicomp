@@ -58,6 +58,19 @@ target_link_libraries(malicompat-shim-test PRIVATE
     dl
 )
 
-set_target_properties(malicompat-probe malicompat-shim-test PROPERTIES
+# BC Texture decompressor verification test
+add_executable(malicompat-bc-test
+    tests/bc_decompressor_test.cpp
+)
+
+target_include_directories(malicompat-bc-test PRIVATE
+    malicompat-core
+)
+
+target_link_libraries(malicompat-bc-test PRIVATE
+    malicompat
+)
+
+set_target_properties(malicompat-probe malicompat-shim-test malicompat-bc-test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
