@@ -11,6 +11,7 @@ add_library(malicompat SHARED
     malicompat-core/capability_analyzer.cpp
     malicompat-core/descriptor_virtualizer.cpp
     malicompat-core/descriptor_shim.cpp
+    malicompat-core/vulkan_layer_exports.cpp
 )
 
 target_include_directories(malicompat PUBLIC
@@ -42,6 +43,20 @@ target_link_libraries(malicompat-probe PRIVATE
     dl
 )
 
-set_target_properties(malicompat-probe PROPERTIES
+# Conformance test for verifying descriptor shim behavior on target hardware
+add_executable(malicompat-shim-test
+    tests/shim_conformance_test.cpp
+)
+
+target_include_directories(malicompat-shim-test PRIVATE
+    malicompat-core
+)
+
+target_link_libraries(malicompat-shim-test PRIVATE
+    malicompat
+    dl
+)
+
+set_target_properties(malicompat-probe malicompat-shim-test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
