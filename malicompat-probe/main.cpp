@@ -1,5 +1,6 @@
 #include "capability_analyzer.h"
 #include <iostream>
+#include <vector>
 #include <dlfcn.h>
 #include <vulkan/vulkan.h>
 
