@@ -11,7 +11,28 @@ extern "C" {
 MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInstanceProcAddr(VkInstance instance, const char* pName);
 MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDeviceProcAddr(VkDevice device, const char* pName);
 
-// Intercepted Core Functions
+// Intercepted Device / Instance Functions
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatures(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceFeatures* pFeatures);
+
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatures2(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceFeatures2* pFeatures);
+
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkEnumerateDeviceExtensionProperties(
+    VkPhysicalDevice physicalDevice,
+    const char* pLayerName,
+    uint32_t* pPropertyCount,
+    VkExtensionProperties* pProperties);
+
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
+    VkPhysicalDevice physicalDevice,
+    const VkDeviceCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDevice* pDevice);
+
+// Intercepted Descriptor Functions
 VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDescriptorSetLayout(
     VkDevice device,
     const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
