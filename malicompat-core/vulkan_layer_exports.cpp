@@ -4,6 +4,11 @@
 #include <dlfcn.h>
 #include <unordered_map>
 #include <mutex>
+#include <android/log.h>
+
+#define LOG_TAG "MaliCompat"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
 
@@ -16,6 +21,7 @@ PFN_vkAllocateDescriptorSets g_real_vkAllocateDescriptorSets = nullptr;
 PFN_vkUpdateDescriptorSets g_real_vkUpdateDescriptorSets = nullptr;
 PFN_vkCmdBindDescriptorSets g_real_vkCmdBindDescriptorSets = nullptr;
 PFN_vkCreateQueryPool g_real_vkCreateQueryPool = nullptr;
+PFN_vkGetPhysicalDeviceFeatures2 g_real_vkGetPhysicalDeviceFeatures2 = nullptr;
 
 std::once_flag g_init_flag;
 
@@ -30,6 +36,10 @@ void InitRealVulkan() {
             g_real_vkUpdateDescriptorSets = reinterpret_cast<PFN_vkUpdateDescriptorSets>(dlsym(g_real_vulkan, "vkUpdateDescriptorSets"));
             g_real_vkCmdBindDescriptorSets = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(dlsym(g_real_vulkan, "vkCmdBindDescriptorSets"));
             g_real_vkCreateQueryPool = reinterpret_cast<PFN_vkCreateQueryPool>(dlsym(g_real_vulkan, "vkCreateQueryPool"));
+            g_real_vkGetPhysicalDeviceFeatures2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(dlsym(g_real_vulkan, "vkGetPhysicalDeviceFeatures2"));
+            LOGI("Initialized MaliCompat layer with real libvulkan.so");
+        } else {
+            LOGE("Failed to open real libvulkan.so: %s", dlerror());
         }
     });
 }
@@ -37,6 +47,32 @@ void InitRealVulkan() {
 } // namespace
 
 extern "C" {
+
+VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatures2(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceFeatures2* pFeatures) {
+    InitRealVulkan();
+    if (g_real_vkGetPhysicalDeviceFeatures2) {
+        g_real_vkGetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
+    }
+    if (!pFeatures) return;
+
+    // Intercept pNext chain to expose emulated descriptor indexing features to games
+    auto* next = reinterpret_cast<VkBaseOutStructure*>(pFeatures->pNext);
+    while (next) {
+        if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES) {
+            auto* indexing = reinterpret_cast<VkPhysicalDeviceDescriptorIndexingFeatures*>(next);
+            // Emulate capabilities: tell the game's check that these features are available via MaliCompat!
+            indexing->runtimeDescriptorArray = VK_TRUE;
+            indexing->descriptorBindingPartiallyBound = VK_TRUE;
+            indexing->descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+            indexing->descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+            LOGI("Intercepted VkPhysicalDeviceDescriptorIndexingFeatures query: emulated flags enabled");
+            break;
+        }
+        next = next->pNext;
+    }
+}
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     InitRealVulkan();
@@ -47,6 +83,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInstanceProcAddr(VkInst
     if (std::strcmp(pName, "vkUpdateDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkUpdateDescriptorSets);
     if (std::strcmp(pName, "vkCmdBindDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdBindDescriptorSets);
     if (std::strcmp(pName, "vkCreateQueryPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateQueryPool);
+    if (std::strcmp(pName, "vkGetPhysicalDeviceFeatures2") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetPhysicalDeviceFeatures2);
 
     if (g_real_vkGetInstanceProcAddr) {
         return g_real_vkGetInstanceProcAddr(instance, pName);
@@ -149,6 +186,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(VkCommandBuffer b, VkPipeline
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateQueryPool(VkDevice d, const VkQueryPoolCreateInfo* c, const VkAllocationCallbacks* a, VkQueryPool* q) {
     return malicompat_vkCreateQueryPool(d, c, a, q);
+}
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFeatures2(VkPhysicalDevice g, VkPhysicalDeviceFeatures2* f) {
+    malicompat_vkGetPhysicalDeviceFeatures2(g, f);
 }
 
 } // extern "C"
