@@ -46,3 +46,9 @@ All adapted techniques are attributed in `README.md`:
 - `leegao/bionic-vulkan-wrapper` by leegao (MIT)
 - Mesa 3D Graphics Library / PanVK by Collabora, Arm Ltd., and contributors (MIT)
 
+
+## Credits & Attributions
+- [codepdbh/nfsmw-android](https://github.com/codepdbh/nfsmw-android) - Android port of Need for Speed Most Wanted (2005) recompilation.
+- [WINDROID-EMU/NFSMW-RECOMP](https://github.com/WINDROID-EMU/NFSMW-RECOMP) & [victorgbd](https://github.com/victorgbd/NFSMW-Recompiled-Mobile) - 4-descriptor set Vulkan pipeline adaptation for mobile GPUs.
+- [brunodev85/vortek](https://github.com/brunodev85/vortek) - Winlator Vortek Vulkan compatibility layer and Mali extension filtering techniques.
+- [Mesa / PanVK](https://docs.mesa3d.org/drivers/panfrost.html) - Open source Arm Mali Vulkan driver research.
