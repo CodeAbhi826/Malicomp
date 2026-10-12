@@ -466,8 +466,21 @@ void VulkanDescriptorShim::InterceptCmdBindDescriptorSets(
 
     if (!realFunc) return;
 
-    // Direct invocation: shadow state is already flushed prior to binding
-    realFunc(commandBuffer, pipelineBindPoint, layout, firstSet, descriptorSetCount, pDescriptorSets, dynamicOffsetCount, pDynamicOffsets);
+    // Mali-G71 hardware limit: maxBoundDescriptorSets == 4 (Sets 0..3)
+    if (firstSet >= 4) {
+        LOGW("InterceptCmdBindDescriptorSets: firstSet %u >= 4 exceeds Mali maxBoundDescriptorSets limit, dropping binding call", firstSet);
+        return;
+    }
+
+    uint32_t clampedCount = descriptorSetCount;
+    if (firstSet + clampedCount > 4) {
+        LOGW("InterceptCmdBindDescriptorSets: firstSet (%u) + descriptorSetCount (%u) > 4, clamping to %u sets",
+             firstSet, descriptorSetCount, 4 - firstSet);
+        clampedCount = 4 - firstSet;
+    }
+
+    // Direct invocation with clamped sets: shadow state is already flushed prior to binding
+    realFunc(commandBuffer, pipelineBindPoint, layout, firstSet, clampedCount, pDescriptorSets, dynamicOffsetCount, pDynamicOffsets);
 }
 
 } // namespace malicompat
