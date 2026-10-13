@@ -625,7 +625,8 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkEnumerateDeviceExt
             res = realEnum(physicalDevice, pLayerName, &count, nullptr);
         }
         if (res == VK_SUCCESS || res == VK_INCOMPLETE) {
-            *pPropertyCount = count + 1;
+            // M3: reserve room for both emulated extensions (indexing + swapchain).
+            *pPropertyCount = count + 2;
         } else {
             *pPropertyCount = count;
         }
@@ -639,19 +640,29 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkEnumerateDeviceExt
         res = realEnum(physicalDevice, pLayerName, &real_count, pProperties);
     }
 
-    bool found = false;
+    bool found_indexing = false;
+    bool found_swapchain = false;
     for (uint32_t i = 0; i < real_count; ++i) {
         if (std::strcmp(pProperties[i].extensionName, "VK_EXT_descriptor_indexing") == 0) {
-            found = true;
-            break;
+            found_indexing = true;
+        } else if (std::strcmp(pProperties[i].extensionName, "VK_KHR_swapchain") == 0) {
+            found_swapchain = true;
         }
     }
+    LOGI("EnumerateDeviceExtensionProperties fill: res=%d vendor_count=%u capacity=%u indexing=%d swapchain=%d",
+         res, real_count, capacity, (int)found_indexing, (int)found_swapchain);
 
-    if (!found && real_count < capacity) {
+    if (!found_indexing && real_count < capacity) {
         std::strncpy(pProperties[real_count].extensionName, "VK_EXT_descriptor_indexing", VK_MAX_EXTENSION_NAME_SIZE);
         pProperties[real_count].specVersion = 2;
         real_count++;
         LOGI("Appended emulated VK_EXT_descriptor_indexing to device extensions list");
+    }
+    if (!found_swapchain && real_count < capacity) {
+        std::strncpy(pProperties[real_count].extensionName, "VK_KHR_swapchain", VK_MAX_EXTENSION_NAME_SIZE);
+        pProperties[real_count].specVersion = 68;
+        real_count++;
+        LOGI("Appended emulated VK_KHR_swapchain to device extensions list (served by system WSI)");
     }
     *pPropertyCount = real_count;
     return res;
@@ -696,6 +707,38 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
 
     VkDeviceCreateInfo modifiedCreateInfo = *pCreateInfo;
 
+    // M3: determine whether the vendor ICD really lacks VK_KHR_swapchain (we
+    // report it as emulated and serve WSI through the system loader). Fresh
+    // query per call; device creation is rare. Defaults to passthrough.
+    bool vendor_lacks_swapchain = false;
+    {
+        PFN_vkEnumerateDeviceExtensionProperties vendorEnum = nullptr;
+        if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+            vendorEnum = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+                g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties"));
+        }
+        if (!vendorEnum && g_vendor_vkEnumerateDeviceExtensionProperties) {
+            vendorEnum = g_vendor_vkEnumerateDeviceExtensionProperties;
+        }
+        if (vendorEnum) {
+            uint32_t vn = 0;
+            if (vendorEnum(physicalDevice, nullptr, &vn, nullptr) == VK_SUCCESS && vn > 0 && vn <= 512) {
+                std::vector<VkExtensionProperties> vexts(vn);
+                uint32_t fill = vn;
+                if (vendorEnum(physicalDevice, nullptr, &fill, vexts.data()) == VK_SUCCESS) {
+                    vendor_lacks_swapchain = true;
+                    for (uint32_t k = 0; k < fill; ++k) {
+                        if (std::strcmp(vexts[k].extensionName, "VK_KHR_swapchain") == 0) {
+                            vendor_lacks_swapchain = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    LOGI("CreateDevice: vendor VK_KHR_swapchain %s", vendor_lacks_swapchain ? "MISSING (emulate+strip)" : "present (passthrough)");
+
     // 1. Filter out VK_EXT_descriptor_indexing from enabled extensions for vendor driver (F4)
     std::vector<const char*> filteredExtensions;
     if (pCreateInfo->ppEnabledExtensionNames) {
@@ -703,6 +746,10 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
             const char* ext = pCreateInfo->ppEnabledExtensionNames[i];
             if (ext && std::strcmp(ext, "VK_EXT_descriptor_indexing") == 0) {
                 LOGI("Filtering out unsupported VK_EXT_descriptor_indexing from vendor vkCreateDevice");
+                continue;
+            }
+            if (ext && vendor_lacks_swapchain && std::strcmp(ext, "VK_KHR_swapchain") == 0) {
+                LOGI("Filtering out emulated VK_KHR_swapchain from vendor vkCreateDevice (system WSI serves it)");
                 continue;
             }
             if (ext) {

@@ -1,4 +1,5 @@
 #include "capability_analyzer.h"
+#include <cstring>
 #include <iostream>
 #include <vector>
 #include <dlfcn.h>
@@ -85,6 +86,54 @@ int main() {
             std::cout << "Unsupported\n"; break;
     }
     std::cout << "Occlusion Queries:      " << (malicompat::CapabilityAnalyzer::ShouldDisableOcclusionQueries(caps.vendorId) ? "Disabled (Quirk Active)" : "Enabled") << "\n";
+
+    // M3 gate telemetry: the exact CreateIfSupported gates for this GPU.
+    {
+        auto vkGetPhysicalDeviceFeatures =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceFeatures"));
+        auto vkEnumerateDeviceExtensionProperties =
+            reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(vkGetInstanceProcAddr(instance, "vkEnumerateDeviceExtensionProperties"));
+        auto vkGetPhysicalDeviceQueueFamilyProperties =
+            reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceQueueFamilyProperties"));
+        std::cout << "--- CreateIfSupported gates ---\n";
+        if (vkGetPhysicalDeviceFeatures) {
+            VkPhysicalDeviceFeatures f{};
+            vkGetPhysicalDeviceFeatures(gpu, &f);
+            std::cout << "independentBlend: " << (f.independentBlend ? "yes" : "NO") << "\n";
+            std::cout << "fragmentStoresAndAtomics: " << (f.fragmentStoresAndAtomics ? "yes" : "NO") << "\n";
+            std::cout << "vertexPipelineStoresAndAtomics: " << (f.vertexPipelineStoresAndAtomics ? "yes" : "NO") << "\n";
+            std::cout << "geometryShader: " << (f.geometryShader ? "yes" : "NO") << "\n";
+            std::cout << "fillModeNonSolid: " << (f.fillModeNonSolid ? "yes" : "NO") << "\n";
+            std::cout << "samplerAnisotropy: " << (f.samplerAnisotropy ? "yes" : "NO") << "\n";
+            std::cout << "sparseBinding: " << (f.sparseBinding ? "yes" : "NO") << "\n";
+        }
+        if (vkEnumerateDeviceExtensionProperties) {
+            uint32_t n = 0;
+            if (vkEnumerateDeviceExtensionProperties(gpu, nullptr, &n, nullptr) == VK_SUCCESS) {
+                std::vector<VkExtensionProperties> exts(n);
+                if (vkEnumerateDeviceExtensionProperties(gpu, nullptr, &n, exts.data()) == VK_SUCCESS) {
+                    bool swap = false;
+                    std::cout << "device extensions (" << n << "):\n";
+                    for (const auto& e : exts) {
+                        if (std::strcmp(e.extensionName, "VK_KHR_swapchain") == 0) swap = true;
+                        std::cout << "  " << e.extensionName << "\n";
+                    }
+                    std::cout << "VK_KHR_swapchain: " << (swap ? "yes" : "MISSING") << "\n";
+                }
+            }
+        }
+        if (vkGetPhysicalDeviceQueueFamilyProperties) {
+            uint32_t n = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(gpu, &n, nullptr);
+            std::vector<VkQueueFamilyProperties> qs(n);
+            vkGetPhysicalDeviceQueueFamilyProperties(gpu, &n, qs.data());
+            std::cout << "queue families (" << n << "):\n";
+            for (uint32_t i = 0; i < n; ++i) {
+                std::cout << "  [" << i << "] flags=0x" << std::hex << qs[i].queueFlags << std::dec
+                          << " count=" << qs[i].queueCount << "\n";
+            }
+        }
+    }
     std::cout << "===============================================================\n\n";
 
     vkDestroyInstance(instance, nullptr);
