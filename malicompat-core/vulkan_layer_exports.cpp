@@ -1102,11 +1102,10 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
         if (std::strcmp(pName, "vkQueuePresentKHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkQueuePresentKHR);
     }
 
-    // Default: forward to vendor driver
-    PFN_vkVoidFunction pfn = nullptr;
-    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
-        pfn = g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, pName);
-    }
+    // Default: forward to vendor driver. M7: resolve via the live instance
+    // (NULL gives crippled results on this driver); without it the SDK fails
+    // to load device functions and CreateIfSupported returns null.
+    PFN_vkVoidFunction pfn = malicompat_vendor_proc(pName);
     if (!pfn && g_vendor_vulkan) {
         pfn = reinterpret_cast<PFN_vkVoidFunction>(dlsym(g_vendor_vulkan, pName));
     }
