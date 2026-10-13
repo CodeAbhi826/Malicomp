@@ -75,6 +75,25 @@ void* g_vendor_vulkan = nullptr;
 hwvulkan_device_t* g_vendor_device = nullptr;
 hwvulkan_device_t g_malicompat_device;
 
+// M5: last vendor VkInstance we created. Resolving vendor procs against it
+// instead of VK_NULL_HANDLE: the NULL path returns a crippled 2-extension
+// list from EnumerateDeviceExtensionProperties on this driver.
+VkInstance g_vendor_instance = VK_NULL_HANDLE;
+
+// Resolve a vendor proc, preferring the live instance over VK_NULL_HANDLE.
+static PFN_vkVoidFunction malicompat_vendor_proc(const char* name) {
+    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+        PFN_vkVoidFunction pfn = g_vendor_device->GetInstanceProcAddr(
+            g_vendor_instance, name);
+        if (pfn) return pfn;
+        if (g_vendor_instance != VK_NULL_HANDLE) {
+            pfn = g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, name);
+            if (pfn) return pfn;
+        }
+    }
+    return nullptr;
+}
+
 PFN_vkCreateDescriptorPool g_vendor_vkCreateDescriptorPool = nullptr;
 PFN_vkCreateDescriptorSetLayout g_vendor_vkCreateDescriptorSetLayout = nullptr;
 PFN_vkAllocateDescriptorSets g_vendor_vkAllocateDescriptorSets = nullptr;
@@ -325,6 +344,11 @@ static VkResult VKAPI_CALL malicompat_hal_CreateInstance(
     }
     LOGI("CreateInstance result: %d (instance=%p)", instanceRes,
          (pInstance ? (const void*)*pInstance : nullptr));
+    if (instanceRes == VK_SUCCESS && pInstance && *pInstance) {
+        // M5: remember the vendor instance so later vendor-proc resolution
+        // uses it instead of VK_NULL_HANDLE (which yields crippled results).
+        g_vendor_instance = *pInstance;
+    }
     return instanceRes;
 }
 
@@ -388,7 +412,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
     PFN_vkGetPhysicalDeviceFeatures realPfn = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realPfn = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(
-            g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures"));
+            malicompat_vendor_proc("vkGetPhysicalDeviceFeatures"));
     }
     if (!realPfn && g_vendor_vkGetPhysicalDeviceFeatures) {
         realPfn = g_vendor_vkGetPhysicalDeviceFeatures;
@@ -416,10 +440,10 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
     PFN_vkGetPhysicalDeviceFeatures2 realPfn = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realPfn = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
-            g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2"));
+            malicompat_vendor_proc("vkGetPhysicalDeviceFeatures2"));
         if (!realPfn) {
             realPfn = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
-                g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures2KHR"));
+                malicompat_vendor_proc("vkGetPhysicalDeviceFeatures2KHR"));
         }
     }
     if (!realPfn && g_vendor_vkGetPhysicalDeviceFeatures2) {
@@ -432,7 +456,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
         PFN_vkGetPhysicalDeviceFeatures realFeat1 = nullptr;
         if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
             realFeat1 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(
-                g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkGetPhysicalDeviceFeatures"));
+                malicompat_vendor_proc("vkGetPhysicalDeviceFeatures"));
         }
         if (!realFeat1 && g_vendor_vkGetPhysicalDeviceFeatures) {
             realFeat1 = g_vendor_vkGetPhysicalDeviceFeatures;
@@ -615,7 +639,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkEnumerateDeviceExt
     PFN_vkEnumerateDeviceExtensionProperties realEnum = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realEnum = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
-            g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties"));
+            malicompat_vendor_proc("vkEnumerateDeviceExtensionProperties"));
     }
     if (!realEnum && g_vendor_vkEnumerateDeviceExtensionProperties) {
         realEnum = g_vendor_vkEnumerateDeviceExtensionProperties;
@@ -654,6 +678,9 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkEnumerateDeviceExt
     }
     LOGI("EnumerateDeviceExtensionProperties fill: res=%d vendor_count=%u capacity=%u indexing=%d swapchain=%d",
          res, real_count, capacity, (int)found_indexing, (int)found_swapchain);
+    for (uint32_t i = 0; i < real_count && i < 3; ++i) {
+        LOGI("EnumerateDeviceExtensionProperties vendor[%u] = '%s'", i, pProperties[i].extensionName);
+    }
 
     if (!found_indexing && real_count < capacity) {
         std::strncpy(pProperties[real_count].extensionName, "VK_EXT_descriptor_indexing", VK_MAX_EXTENSION_NAME_SIZE);
@@ -718,7 +745,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
         PFN_vkEnumerateDeviceExtensionProperties vendorEnum = nullptr;
         if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
             vendorEnum = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
-                g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateDeviceExtensionProperties"));
+                malicompat_vendor_proc("vkEnumerateDeviceExtensionProperties"));
         }
         if (!vendorEnum && g_vendor_vkEnumerateDeviceExtensionProperties) {
             vendorEnum = g_vendor_vkEnumerateDeviceExtensionProperties;
@@ -827,7 +854,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
     PFN_vkCreateDevice realCreate = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realCreate = reinterpret_cast<PFN_vkCreateDevice>(
-            g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateDevice"));
+            malicompat_vendor_proc("vkCreateDevice"));
     }
     if (!realCreate && g_vendor_vkCreateDevice) {
         realCreate = g_vendor_vkCreateDevice;
