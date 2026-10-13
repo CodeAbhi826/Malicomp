@@ -451,8 +451,12 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
         // rejects vkCreateDevice (routed straight to it, bypassing our
         // sanitizer). Gate tolerance for the one hard requirement left
         // (vertexPipelineStoresAndAtomics) is handled separately.
-        LOGI("vkGetPhysicalDeviceFeatures passthrough (vertexPipelineStoresAndAtomics=%d fillModeNonSolid=%d)",
-             (int)pFeatures->vertexPipelineStoresAndAtomics, (int)pFeatures->fillModeNonSolid);
+        // M7b: log the full gate-relevant set + whether vendor resolution worked.
+        LOGI("vkGetPhysicalDeviceFeatures via=%s independentBlend=%d fragmentStoresAndAtomics=%d vertexPipelineStoresAndAtomics=%d geometryShader=%d fillModeNonSolid=%d samplerAnisotropy=%d",
+             realPfn ? "vendor" : "NONE(ZEROS?)",
+             (int)pFeatures->independentBlend, (int)pFeatures->fragmentStoresAndAtomics,
+             (int)pFeatures->vertexPipelineStoresAndAtomics, (int)pFeatures->geometryShader,
+             (int)pFeatures->fillModeNonSolid, (int)pFeatures->samplerAnisotropy);
     }
 }
 
