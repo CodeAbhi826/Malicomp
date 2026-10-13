@@ -1946,6 +1946,34 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionPrope
     return malicompat_vkEnumerateDeviceExtensionProperties(d, l, c, p);
 }
 
+// M11: plain forwarders adrenotools/dlsym users need. Without these exports,
+// loading our .so as THE driver yields zero physical devices (and missing
+// properties/queues), killing boot before any Vulkan call.
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkEnumeratePhysicalDevices(VkInstance i, uint32_t* c, VkPhysicalDevice* p) {
+    return malicompat_vkEnumeratePhysicalDevices(i, c, p);
+}
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(VkInstance i, const VkAllocationCallbacks* a) {
+    auto pfn = reinterpret_cast<PFN_vkDestroyInstance>(malicompat_vendor_proc("vkDestroyInstance"));
+    if (pfn) pfn(i, a);
+}
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties(VkPhysicalDevice d, VkPhysicalDeviceProperties* p) {
+    auto pfn = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(malicompat_vendor_proc("vkGetPhysicalDeviceProperties"));
+    if (pfn && p) pfn(d, p);
+}
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice d, uint32_t* c, VkQueueFamilyProperties* p) {
+    auto pfn = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(malicompat_vendor_proc("vkGetPhysicalDeviceQueueFamilyProperties"));
+    if (pfn && c) pfn(d, c, p);
+}
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties(VkPhysicalDevice d, VkPhysicalDeviceMemoryProperties* p) {
+    auto pfn = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(malicompat_vendor_proc("vkGetPhysicalDeviceMemoryProperties"));
+    if (pfn && p) pfn(d, p);
+}
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(const char* l, uint32_t* c, VkExtensionProperties* p) {
+    auto pfn = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(malicompat_vendor_proc("vkEnumerateInstanceExtensionProperties"));
+    if (!pfn) return VK_ERROR_INITIALIZATION_FAILED;
+    return pfn(l, c, p);
+}
+
 // WSI Exports (F1)
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateAndroidSurfaceKHR(VkInstance i, const VkAndroidSurfaceCreateInfoKHR* c, const VkAllocationCallbacks* a, VkSurfaceKHR* s) {
     return malicompat_vkCreateAndroidSurfaceKHR(i, c, a, s);
