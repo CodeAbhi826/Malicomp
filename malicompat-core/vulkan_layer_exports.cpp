@@ -337,10 +337,39 @@ static VkResult VKAPI_CALL malicompat_hal_CreateInstance(
         }
     }
     VkResult instanceRes = VK_ERROR_INITIALIZATION_FAILED;
+    // M10: ensure KHR_get_physical_device_properties2 is enabled so the SDK
+    // actually issues Properties2/Features2 queries (otherwise their structs
+    // stay zeroed and every requirement check fails). Harmless when already
+    // present; the extension is core since 1.1.
+    VkInstanceCreateInfo modifiedInfo;
+    std::vector<const char*> instanceExts;
+    const VkInstanceCreateInfo* pInfoForCreate = pCreateInfo;
+    if (pCreateInfo) {
+        bool hasProps2 = false;
+        if (pCreateInfo->ppEnabledExtensionNames) {
+            for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+                const char* ext = pCreateInfo->ppEnabledExtensionNames[i];
+                if (ext) {
+                    instanceExts.push_back(ext);
+                    if (std::strcmp(ext, "VK_KHR_get_physical_device_properties2") == 0) {
+                        hasProps2 = true;
+                    }
+                }
+            }
+        }
+        if (!hasProps2) {
+            instanceExts.push_back("VK_KHR_get_physical_device_properties2");
+            LOGI("CreateInstance: appending VK_KHR_get_physical_device_properties2");
+        }
+        modifiedInfo = *pCreateInfo;
+        modifiedInfo.enabledExtensionCount = static_cast<uint32_t>(instanceExts.size());
+        modifiedInfo.ppEnabledExtensionNames = instanceExts.data();
+        pInfoForCreate = &modifiedInfo;
+    }
     if (g_vendor_device && g_vendor_device->CreateInstance) {
-        instanceRes = g_vendor_device->CreateInstance(pCreateInfo, pAllocator, pInstance);
+        instanceRes = g_vendor_device->CreateInstance(pInfoForCreate, pAllocator, pInstance);
     } else if (g_vendor_vkCreateInstance) {
-        instanceRes = g_vendor_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
+        instanceRes = g_vendor_vkCreateInstance(pInfoForCreate, pAllocator, pInstance);
     }
     LOGI("CreateInstance result: %d (instance=%p)", instanceRes,
          (pInstance ? (const void*)*pInstance : nullptr));
