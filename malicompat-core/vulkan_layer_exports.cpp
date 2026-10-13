@@ -967,7 +967,17 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
         };
         for (const char** w = kWatchedProcNames; *w; ++w) {
             if (std::strcmp(pName, *w) == 0) {
-                LOGI("GetInstanceProcAddr query: '%s' (instance=%p)", pName, (const void*)instance);
+                // M8: attribute the query to its caller module (loader vs SDK).
+                Dl_info info{};
+                const void* ret = __builtin_return_address(0);
+                const char* mod = "?";
+                const char* sym = "?";
+                if (dladdr(ret, &info)) {
+                    if (info.dli_fname) mod = info.dli_fname;
+                    if (info.dli_sname) sym = info.dli_sname;
+                }
+                LOGI("GetInstanceProcAddr query: '%s' (instance=%p) from %s:%s",
+                     pName, (const void*)instance, mod, sym);
                 break;
             }
         }
