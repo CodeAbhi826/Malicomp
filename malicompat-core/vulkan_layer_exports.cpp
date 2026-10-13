@@ -306,13 +306,26 @@ static VkResult VKAPI_CALL malicompat_hal_CreateInstance(
     const VkAllocationCallbacks* pAllocator,
     VkInstance* pInstance) {
     InitRealVulkan();
+    // Diagnostic probe (M2): log what the app asks the instance for.
+    if (pCreateInfo) {
+        uint32_t api = pCreateInfo->pApplicationInfo ? pCreateInfo->pApplicationInfo->apiVersion : 0;
+        LOGI("CreateInstance request: apiVersion=0x%08x extCount=%u", api, pCreateInfo->enabledExtensionCount);
+        if (pCreateInfo->ppEnabledExtensionNames) {
+            for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+                const char* ext = pCreateInfo->ppEnabledExtensionNames[i];
+                LOGI("CreateInstance request ext[%u] = '%s'", i, ext ? ext : "(null)");
+            }
+        }
+    }
+    VkResult instanceRes = VK_ERROR_INITIALIZATION_FAILED;
     if (g_vendor_device && g_vendor_device->CreateInstance) {
-        return g_vendor_device->CreateInstance(pCreateInfo, pAllocator, pInstance);
+        instanceRes = g_vendor_device->CreateInstance(pCreateInfo, pAllocator, pInstance);
+    } else if (g_vendor_vkCreateInstance) {
+        instanceRes = g_vendor_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
     }
-    if (g_vendor_vkCreateInstance) {
-        return g_vendor_vkCreateInstance(pCreateInfo, pAllocator, pInstance);
-    }
-    return VK_ERROR_INITIALIZATION_FAILED;
+    LOGI("CreateInstance result: %d (instance=%p)", instanceRes,
+         (pInstance ? (const void*)*pInstance : nullptr));
+    return instanceRes;
 }
 
 static int malicompat_hal_open(const struct hw_module_t* module, const char* id, struct hw_device_t** device) {
@@ -649,6 +662,27 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
 
     if (!pCreateInfo) return VK_ERROR_INITIALIZATION_FAILED;
 
+    // Diagnostic probe (M2): dump the full device request. Bounded: runs at
+    // most once per vkCreateDevice call.
+    LOGI("vkCreateDevice request: extCount=%u queueInfos=%u features=%p pNext=%p",
+         pCreateInfo->enabledExtensionCount, pCreateInfo->queueCreateInfoCount,
+         (const void*)pCreateInfo->pEnabledFeatures, pCreateInfo->pNext);
+    if (pCreateInfo->ppEnabledExtensionNames) {
+        for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+            const char* ext = pCreateInfo->ppEnabledExtensionNames[i];
+            LOGI("vkCreateDevice request ext[%u] = '%s'", i, ext ? ext : "(null)");
+        }
+    }
+    {
+        const auto* node = reinterpret_cast<const VkBaseInStructure*>(pCreateInfo->pNext);
+        uint32_t depth = 0;
+        while (node && depth < 16) {
+            LOGI("vkCreateDevice request pNext[%u] sType=%d", depth, (int)node->sType);
+            node = node->pNext;
+            ++depth;
+        }
+    }
+
     // Gracefully reject null extension array when extension count > 0
     if (pCreateInfo->enabledExtensionCount > 0 && !pCreateInfo->ppEnabledExtensionNames) {
         LOGE("vkCreateDevice: enabledExtensionCount > 0 but ppEnabledExtensionNames is NULL");
@@ -782,6 +816,14 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkDestroyDevice(
 MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     InitRealVulkan();
     if (!pName) return nullptr;
+
+    // Diagnostic probe (M2): trace whether the loader/app ever resolves the
+    // device-creation path through us. Bounded to two names; everything else
+    // stays silent to avoid log flooding.
+    if (std::strcmp(pName, "vkCreateDevice") == 0 ||
+        std::strcmp(pName, "vkEnumeratePhysicalDevices") == 0) {
+        LOGI("GetInstanceProcAddr query: '%s' (instance=%p)", pName, (const void*)instance);
+    }
 
     // Direct entry point interception
     if (std::strcmp(pName, "vkGetInstanceProcAddr") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetInstanceProcAddr);
