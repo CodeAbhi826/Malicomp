@@ -94,6 +94,29 @@ static PFN_vkVoidFunction malicompat_vendor_proc(const char* name) {
     return nullptr;
 }
 
+// M6: device-domain resolution for VkDevice handles that are the vendor's
+// own. See header note.
+MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_resolve_vendor_device_proc(
+    VkDevice device, const char* name) {
+    InitRealVulkan();
+    if (!name) return nullptr;
+    PFN_vkGetDeviceProcAddr vendorGetDevice = nullptr;
+    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+        auto p = malicompat_vendor_proc("vkGetDeviceProcAddr");
+        if (p) vendorGetDevice = reinterpret_cast<PFN_vkGetDeviceProcAddr>(p);
+    }
+    if (vendorGetDevice && device) {
+        PFN_vkVoidFunction pfn = vendorGetDevice(device, name);
+        if (pfn) return pfn;
+    }
+    if (g_vendor_vulkan) {
+        PFN_vkVoidFunction pfn =
+            reinterpret_cast<PFN_vkVoidFunction>(dlsym(g_vendor_vulkan, name));
+        if (pfn) return pfn;
+    }
+    return nullptr;
+}
+
 PFN_vkCreateDescriptorPool g_vendor_vkCreateDescriptorPool = nullptr;
 PFN_vkCreateDescriptorSetLayout g_vendor_vkCreateDescriptorSetLayout = nullptr;
 PFN_vkAllocateDescriptorSets g_vendor_vkAllocateDescriptorSets = nullptr;

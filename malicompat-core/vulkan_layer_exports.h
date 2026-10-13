@@ -21,6 +21,14 @@ extern "C" {
 MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInstanceProcAddr(VkInstance instance, const char* pName);
 MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDeviceProcAddr(VkDevice device, const char* pName);
 
+// Resolve a device-level function inside the vendor dispatch domain.
+// The VkDevice handles handed to us are the vendor's own; resolving via
+// RTLD_DEFAULT can land on a *different* loader copy (memfd) that never saw
+// the device and crashes in its dispatch. Falls back to nullptr (caller
+// decides the fallback).
+MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_resolve_vendor_device_proc(
+    VkDevice device, const char* pName);
+
 // Intercepted Device / Instance Functions
 MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatures(
     VkPhysicalDevice physicalDevice,

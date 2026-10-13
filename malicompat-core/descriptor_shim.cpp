@@ -1,7 +1,21 @@
 #include "descriptor_shim.h"
+#include "vulkan_layer_exports.h"
 #include <vector>
 #include <cstring>
 #include <dlfcn.h>
+
+namespace {
+// M6: resolve device-level functions inside the vendor dispatch domain.
+// dlsym(RTLD_DEFAULT, ...) can land on a different loader copy (memfd) that
+// never saw our (vendor) VkDevice and then crashes in its dispatch.
+PFN_vkVoidFunction shim_device_proc(VkDevice device, const char* name) {
+    PFN_vkVoidFunction pfn = malicompat_resolve_vendor_device_proc(device, name);
+    if (!pfn) {
+        pfn = reinterpret_cast<PFN_vkVoidFunction>(dlsym(RTLD_DEFAULT, name));
+    }
+    return pfn;
+}
+}  // namespace
 
 #if __has_include(<android/log.h>)
 #include <android/log.h>
@@ -61,15 +75,15 @@ void VulkanDescriptorShim::InitializeDeviceResources(VkDevice device, VkPhysical
 
     DeviceDummyResources res{};
 
-    auto pfnCreateImage = reinterpret_cast<PFN_vkCreateImage>(dlsym(RTLD_DEFAULT, "vkCreateImage"));
-    auto pfnGetImageMemReqs = reinterpret_cast<PFN_vkGetImageMemoryRequirements>(dlsym(RTLD_DEFAULT, "vkGetImageMemoryRequirements"));
-    auto pfnAllocMem = reinterpret_cast<PFN_vkAllocateMemory>(dlsym(RTLD_DEFAULT, "vkAllocateMemory"));
-    auto pfnBindImageMem = reinterpret_cast<PFN_vkBindImageMemory>(dlsym(RTLD_DEFAULT, "vkBindImageMemory"));
-    auto pfnCreateImageView = reinterpret_cast<PFN_vkCreateImageView>(dlsym(RTLD_DEFAULT, "vkCreateImageView"));
-    auto pfnCreateSampler = reinterpret_cast<PFN_vkCreateSampler>(dlsym(RTLD_DEFAULT, "vkCreateSampler"));
-    auto pfnCreateBuffer = reinterpret_cast<PFN_vkCreateBuffer>(dlsym(RTLD_DEFAULT, "vkCreateBuffer"));
-    auto pfnGetBufferMemReqs = reinterpret_cast<PFN_vkGetBufferMemoryRequirements>(dlsym(RTLD_DEFAULT, "vkGetBufferMemoryRequirements"));
-    auto pfnBindBufferMem = reinterpret_cast<PFN_vkBindBufferMemory>(dlsym(RTLD_DEFAULT, "vkBindBufferMemory"));
+    auto pfnCreateImage = reinterpret_cast<PFN_vkCreateImage>(shim_device_proc(device, "vkCreateImage"));
+    auto pfnGetImageMemReqs = reinterpret_cast<PFN_vkGetImageMemoryRequirements>(shim_device_proc(device, "vkGetImageMemoryRequirements"));
+    auto pfnAllocMem = reinterpret_cast<PFN_vkAllocateMemory>(shim_device_proc(device, "vkAllocateMemory"));
+    auto pfnBindImageMem = reinterpret_cast<PFN_vkBindImageMemory>(shim_device_proc(device, "vkBindImageMemory"));
+    auto pfnCreateImageView = reinterpret_cast<PFN_vkCreateImageView>(shim_device_proc(device, "vkCreateImageView"));
+    auto pfnCreateSampler = reinterpret_cast<PFN_vkCreateSampler>(shim_device_proc(device, "vkCreateSampler"));
+    auto pfnCreateBuffer = reinterpret_cast<PFN_vkCreateBuffer>(shim_device_proc(device, "vkCreateBuffer"));
+    auto pfnGetBufferMemReqs = reinterpret_cast<PFN_vkGetBufferMemoryRequirements>(shim_device_proc(device, "vkGetBufferMemoryRequirements"));
+    auto pfnBindBufferMem = reinterpret_cast<PFN_vkBindBufferMemory>(shim_device_proc(device, "vkBindBufferMemory"));
 
     if (pfnCreateImage && pfnGetImageMemReqs && pfnAllocMem && pfnBindImageMem && pfnCreateImageView) {
         // 1. Create 1x1 2D Dummy Image (RGBA8)
@@ -198,11 +212,11 @@ void VulkanDescriptorShim::CleanupDeviceResources(VkDevice device) {
 
     auto& res = it->second;
 
-    auto pfnDestroyImageView = reinterpret_cast<PFN_vkDestroyImageView>(dlsym(RTLD_DEFAULT, "vkDestroyImageView"));
-    auto pfnDestroyImage = reinterpret_cast<PFN_vkDestroyImage>(dlsym(RTLD_DEFAULT, "vkDestroyImage"));
-    auto pfnFreeMem = reinterpret_cast<PFN_vkFreeMemory>(dlsym(RTLD_DEFAULT, "vkFreeMemory"));
-    auto pfnDestroySampler = reinterpret_cast<PFN_vkDestroySampler>(dlsym(RTLD_DEFAULT, "vkDestroySampler"));
-    auto pfnDestroyBuffer = reinterpret_cast<PFN_vkDestroyBuffer>(dlsym(RTLD_DEFAULT, "vkDestroyBuffer"));
+    auto pfnDestroyImageView = reinterpret_cast<PFN_vkDestroyImageView>(shim_device_proc(device, "vkDestroyImageView"));
+    auto pfnDestroyImage = reinterpret_cast<PFN_vkDestroyImage>(shim_device_proc(device, "vkDestroyImage"));
+    auto pfnFreeMem = reinterpret_cast<PFN_vkFreeMemory>(shim_device_proc(device, "vkFreeMemory"));
+    auto pfnDestroySampler = reinterpret_cast<PFN_vkDestroySampler>(shim_device_proc(device, "vkDestroySampler"));
+    auto pfnDestroyBuffer = reinterpret_cast<PFN_vkDestroyBuffer>(shim_device_proc(device, "vkDestroyBuffer"));
 
     if (pfnDestroyImageView) {
         if (res.view2D) pfnDestroyImageView(device, res.view2D, nullptr);
@@ -386,7 +400,7 @@ VkResult VulkanDescriptorShim::InterceptAllocateDescriptorSets(
                 // Push dummy pre-bindings to driver so unwritten slots are safe from GPU faults
                 if (!writes.empty()) {
                     auto pfnUpdateDescSets = reinterpret_cast<PFN_vkUpdateDescriptorSets>(
-                        dlsym(RTLD_DEFAULT, "vkUpdateDescriptorSets"));
+                        shim_device_proc(device, "vkUpdateDescriptorSets"));
                     if (pfnUpdateDescSets) {
                         pfnUpdateDescSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
                     }
