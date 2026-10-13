@@ -98,7 +98,8 @@ static PFN_vkVoidFunction malicompat_vendor_proc(const char* name) {
 // own. See header note.
 MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_resolve_vendor_device_proc(
     VkDevice device, const char* name) {
-    InitRealVulkan();
+    // Note: no InitRealVulkan() here (defined later in this TU); all callers
+    // run post-init and every global access below is null-checked.
     if (!name) return nullptr;
     PFN_vkGetDeviceProcAddr vendorGetDevice = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
