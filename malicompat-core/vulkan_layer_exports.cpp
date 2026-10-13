@@ -399,11 +399,13 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
     }
 
     if (pFeatures) {
-        // Emulate vertexPipelineStoresAndAtomics (required by Xenos / RexGPU emulation)
-        pFeatures->vertexPipelineStoresAndAtomics = VK_TRUE;
-        // fillModeNonSolid is also spoofed to satisfy wireframe/debug pipelines
-        pFeatures->fillModeNonSolid = VK_TRUE;
-        LOGI("Intercepted vkGetPhysicalDeviceFeatures: spoofed vertexPipelineStoresAndAtomics=VK_TRUE, fillModeNonSolid=VK_TRUE");
+        // M4: pass through real vertexPipelineStoresAndAtomics / fillModeNonSolid.
+        // Spoofing them TRUE lets feature gates pass, but the vendor then
+        // rejects vkCreateDevice (routed straight to it, bypassing our
+        // sanitizer). Gate tolerance for the one hard requirement left
+        // (vertexPipelineStoresAndAtomics) is handled separately.
+        LOGI("vkGetPhysicalDeviceFeatures passthrough (vertexPipelineStoresAndAtomics=%d fillModeNonSolid=%d)",
+             (int)pFeatures->vertexPipelineStoresAndAtomics, (int)pFeatures->fillModeNonSolid);
     }
 }
 
@@ -441,8 +443,9 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
     }
     if (!pFeatures) return;
 
-    pFeatures->features.vertexPipelineStoresAndAtomics = VK_TRUE;
-    pFeatures->features.fillModeNonSolid = VK_TRUE;
+    // M4: pass through real values (see vkGetPhysicalDeviceFeatures note).
+    LOGI("vkGetPhysicalDeviceFeatures2 passthrough (vertexPipelineStoresAndAtomics=%d fillModeNonSolid=%d)",
+         (int)pFeatures->features.vertexPipelineStoresAndAtomics, (int)pFeatures->features.fillModeNonSolid);
 
     // Intercept pNext chain to expose emulated descriptor indexing features (F2)
     uint32_t depth = 0;
