@@ -604,6 +604,11 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkEnumerateDeviceExt
     InitRealVulkan();
     if (!pPropertyCount) return VK_ERROR_INITIALIZATION_FAILED;
 
+    // Diagnostic probe (M2b): confirm the app enumerates extensions through us.
+    LOGI("EnumerateDeviceExtensionProperties: physDev=%p layer=%s mode=%s",
+         (const void*)physicalDevice, pLayerName ? pLayerName : "(null)",
+         pProperties ? "fill" : "count-query");
+
     PFN_vkEnumerateDeviceExtensionProperties realEnum = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realEnum = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
@@ -813,16 +818,55 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkDestroyDevice(
     }
 }
 
+// Diagnostic probe (M2b): trace physical-device enumeration; forward unchanged.
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkEnumeratePhysicalDevices(
+    VkInstance instance,
+    uint32_t* pPhysicalDeviceCount,
+    VkPhysicalDevice* pPhysicalDevices) {
+    InitRealVulkan();
+    LOGI("EnumeratePhysicalDevices: instance=%p mode=%s", (const void*)instance,
+         pPhysicalDevices ? "fill" : "count-query");
+    PFN_vkEnumeratePhysicalDevices realEnum = nullptr;
+    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+        realEnum = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+            g_vendor_device->GetInstanceProcAddr(instance, "vkEnumeratePhysicalDevices"));
+    }
+    if (!realEnum && g_vendor_vulkan) {
+        realEnum = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+            dlsym(g_vendor_vulkan, "vkEnumeratePhysicalDevices"));
+    }
+    if (!realEnum) {
+        LOGE("EnumeratePhysicalDevices: no vendor implementation");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    VkResult res = realEnum(instance, pPhysicalDeviceCount, pPhysicalDevices);
+    LOGI("EnumeratePhysicalDevices result: %d count=%u", res,
+         pPhysicalDeviceCount ? *pPhysicalDeviceCount : 0);
+    return res;
+}
+
 MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     InitRealVulkan();
     if (!pName) return nullptr;
 
-    // Diagnostic probe (M2): trace whether the loader/app ever resolves the
-    // device-creation path through us. Bounded to two names; everything else
-    // stays silent to avoid log flooding.
-    if (std::strcmp(pName, "vkCreateDevice") == 0 ||
-        std::strcmp(pName, "vkEnumeratePhysicalDevices") == 0) {
-        LOGI("GetInstanceProcAddr query: '%s' (instance=%p)", pName, (const void*)instance);
+    // Diagnostic probe (M2/M2b): trace whether the loader/app ever resolves
+    // the device-creation path through us. Bounded to a small watched set to
+    // avoid log flooding.
+    {
+        static const char* kWatchedProcNames[] = {
+            "vkCreateDevice", "vkEnumeratePhysicalDevices",
+            "vkEnumerateDeviceExtensionProperties",
+            "vkGetPhysicalDeviceProperties", "vkGetPhysicalDeviceProperties2",
+            "vkGetPhysicalDeviceFeatures2", "vkGetPhysicalDeviceFeatures2KHR",
+            "vkGetPhysicalDeviceQueueFamilyProperties",
+            "vkGetPhysicalDeviceMemoryProperties", nullptr
+        };
+        for (const char** w = kWatchedProcNames; *w; ++w) {
+            if (std::strcmp(pName, *w) == 0) {
+                LOGI("GetInstanceProcAddr query: '%s' (instance=%p)", pName, (const void*)instance);
+                break;
+            }
+        }
     }
 
     // Direct entry point interception
@@ -836,6 +880,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
     if (std::strcmp(pName, "vkGetPhysicalDeviceProperties2") == 0 ||
         std::strcmp(pName, "vkGetPhysicalDeviceProperties2KHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetPhysicalDeviceProperties2);
     if (std::strcmp(pName, "vkEnumerateDeviceExtensionProperties") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkEnumerateDeviceExtensionProperties);
+    if (std::strcmp(pName, "vkEnumeratePhysicalDevices") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkEnumeratePhysicalDevices);
 
     // Descriptor Interception
     if (std::strcmp(pName, "vkCreateDescriptorPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateDescriptorPool);
