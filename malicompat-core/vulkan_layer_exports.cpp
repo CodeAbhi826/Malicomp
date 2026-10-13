@@ -1583,13 +1583,18 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueuePresentKHR(
     const VkPresentInfoKHR* pPresentInfo) {
     InitRealVulkan();
 
+    // M9: bounded present tracing (first calls + periodic + errors).
+    static uint32_t s_present_count = 0;
+    ++s_present_count;
+    const bool log_this = (s_present_count <= 5) || (s_present_count % 500 == 0);
+
     // 1. Cross-Driver alignment: Because VkQueue is allocated on the vendor Mali device (g_vendor_device),
     // passing it to the Android system loader causes VK_ERROR_DEVICE_LOST. First route presentation
     // through the vendor driver/HAL where VkQueue was allocated.
     PFN_vkQueuePresentKHR vendorPresent = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         vendorPresent = reinterpret_cast<PFN_vkQueuePresentKHR>(
-            g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkQueuePresentKHR"));
+            malicompat_vendor_proc("vkQueuePresentKHR"));
     }
     if (!vendorPresent && g_vendor_vkQueuePresentKHR) {
         vendorPresent = g_vendor_vkQueuePresentKHR;
@@ -1598,17 +1603,29 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueuePresentKHR(
         vendorPresent = reinterpret_cast<PFN_vkQueuePresentKHR>(dlsym(g_vendor_vulkan, "vkQueuePresentKHR"));
     }
     if (vendorPresent) {
-        return vendorPresent(queue, pPresentInfo);
+        VkResult res = vendorPresent(queue, pPresentInfo);
+        if (log_this || res != VK_SUCCESS) {
+            LOGI("vkQueuePresentKHR #%u -> %d (swapchains=%u)", s_present_count, (int)res,
+                 pPresentInfo ? pPresentInfo->swapchainCount : 0);
+        }
+        return res;
     }
 
     // 2. Fallback to system loader only if vendor driver does not export vkQueuePresentKHR
     if (g_system_vkQueuePresentKHR) {
-        return g_system_vkQueuePresentKHR(queue, pPresentInfo);
+        VkResult res = g_system_vkQueuePresentKHR(queue, pPresentInfo);
+        LOGI("vkQueuePresentKHR #%u -> %d via system loader", s_present_count, (int)res);
+        return res;
     }
     if (g_system_vulkan) {
         auto pfn = reinterpret_cast<PFN_vkQueuePresentKHR>(dlsym(g_system_vulkan, "vkQueuePresentKHR"));
-        if (pfn) return pfn(queue, pPresentInfo);
+        if (pfn) {
+            VkResult res = pfn(queue, pPresentInfo);
+            LOGI("vkQueuePresentKHR #%u -> %d via system dlsym", s_present_count, (int)res);
+            return res;
+        }
     }
+    LOGE("vkQueuePresentKHR #%u: no implementation!", s_present_count);
     return VK_ERROR_INITIALIZATION_FAILED;
 }
 
@@ -1623,10 +1640,13 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueueSubmit(
     }
 
     InitRealVulkan();
+    // M9: bounded submit tracing.
+    static uint32_t s_submit_count = 0;
+    ++s_submit_count;
     PFN_vkQueueSubmit realSubmit = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realSubmit = reinterpret_cast<PFN_vkQueueSubmit>(
-            g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkQueueSubmit"));
+            malicompat_vendor_proc("vkQueueSubmit"));
     }
     if (!realSubmit && g_vendor_vkQueueSubmit) {
         realSubmit = g_vendor_vkQueueSubmit;
@@ -1637,8 +1657,9 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueueSubmit(
 
     if (realSubmit) {
         VkResult res = realSubmit(queue, submitCount, pSubmits, fence);
-        if (res != VK_SUCCESS) {
-            LOGW("malicompat_vkQueueSubmit: vendor vkQueueSubmit returned %d", static_cast<int>(res));
+        if (s_submit_count <= 5 || (s_submit_count % 1000 == 0) || res != VK_SUCCESS) {
+            LOGI("vkQueueSubmit #%u: count=%u fence=%p -> %d", s_submit_count,
+                 submitCount, (const void*)fence, (int)res);
         }
         return res;
     }
