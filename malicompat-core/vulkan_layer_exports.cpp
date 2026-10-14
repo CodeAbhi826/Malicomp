@@ -1065,6 +1065,9 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
     if (std::strcmp(pName, "vkGetDeviceQueue") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetDeviceQueue);
     // M17b: GrallocUsage(+2) proven safe (fires OK); AcquireImage/SignalRelease
     // reverted pending single re-add (bisect).
+    // M17c: re-adding both with NULL-tolerant emulation (see impls).
+    if (std::strcmp(pName, "vkAcquireImageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkAcquireImageANDROID);
+    if (std::strcmp(pName, "vkQueueSignalReleaseImageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkQueueSignalReleaseImageANDROID);
     if (std::strcmp(pName, "vkGetSwapchainGrallocUsageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetSwapchainGrallocUsageANDROID);
     if (std::strcmp(pName, "vkGetSwapchainGrallocUsage2ANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetSwapchainGrallocUsage2ANDROID);
     if (std::strcmp(pName, "vkDestroyPipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkDestroyPipelineCache);
@@ -1146,6 +1149,9 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
     if (std::strcmp(pName, "vkGetDeviceQueue") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetDeviceQueue);
     // M17b: GrallocUsage(+2) proven safe (fires OK); AcquireImage/SignalRelease
     // reverted pending single re-add (bisect).
+    // M17c: re-adding both with NULL-tolerant emulation (see impls).
+    if (std::strcmp(pName, "vkAcquireImageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkAcquireImageANDROID);
+    if (std::strcmp(pName, "vkQueueSignalReleaseImageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkQueueSignalReleaseImageANDROID);
     if (std::strcmp(pName, "vkGetSwapchainGrallocUsageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetSwapchainGrallocUsageANDROID);
     if (std::strcmp(pName, "vkGetSwapchainGrallocUsage2ANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetSwapchainGrallocUsage2ANDROID);
     if (std::strcmp(pName, "vkDestroyPipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkDestroyPipelineCache);
@@ -2126,8 +2132,12 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkAcquireImageANDROI
         realFunc = reinterpret_cast<Pfn>(dlsym(g_vendor_vulkan, "vkAcquireImageANDROID"));
     }
     if (!realFunc) {
-        LOGE("vkAcquireImageANDROID: no vendor proc (image=%p)", (const void*)image);
-        return VK_ERROR_INITIALIZATION_FAILED;
+        // M17c: Mali r15 exports no AcquireImageANDROID (nm-clean); failing
+        // here kills swapchain setup (M17 lesson). Emulate: no fence, success.
+        // If the image is bogus the driver will crash loudly (tombstone=data).
+        LOGW("vkAcquireImageANDROID: no vendor proc, emulating success (fd=-1)");
+        if (pNativeFenceFd) *pNativeFenceFd = -1;
+        return VK_SUCCESS;
     }
     VkResult res = realFunc(device, image, pNativeFenceFd, semaphore, fence);
     static uint32_t s_acq_count = 0;
@@ -2167,9 +2177,11 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueueSignalRelease
         realFunc = reinterpret_cast<Pfn>(dlsym(g_vendor_vulkan, "vkQueueSignalReleaseImageANDROID"));
     }
     if (!realFunc) {
-        LOGE("vkQueueSignalReleaseImageANDROID: no vendor proc (queue=%p image=%p)",
-             (const void*)queue, (const void*)image);
-        return VK_ERROR_INITIALIZATION_FAILED;
+        // M17c: same emulation rationale as AcquireImage. Success here makes
+        // the loader queueBuffer() instead of cancelBuffer() (black screen).
+        LOGW("vkQueueSignalReleaseImageANDROID: no vendor proc, emulating success (fd=-1)");
+        if (pNativeFenceFd) *pNativeFenceFd = -1;
+        return VK_SUCCESS;
     }
     VkResult res = realFunc(queue, waitSemaphoreCount, pWaitSemaphores, image, pNativeFenceFd);
     static uint32_t s_rel_count = 0;
@@ -2471,6 +2483,13 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(VkDevice device, u
 }
 // M17: VK_ANDROID_native_buffer direct bindings (GrallocUsage pair only;
 // AcquireImage/SignalRelease reverted in M17b bisect).
+// M17c: AcquireImage/SignalRelease re-added with NULL-tolerant emulation.
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkAcquireImageANDROID(VkDevice d, VkImage img, int* fd, VkSemaphore s, VkFence f) {
+    return malicompat_vkAcquireImageANDROID(d, img, fd, s, f);
+}
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkQueueSignalReleaseImageANDROID(VkQueue q, uint32_t n, const VkSemaphore* s, VkImage img, int* fd) {
+    return malicompat_vkQueueSignalReleaseImageANDROID(q, n, s, img, fd);
+}
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkGetSwapchainGrallocUsageANDROID(VkDevice d, VkFormat f, VkImageUsageFlags u, int* g) {
     return malicompat_vkGetSwapchainGrallocUsageANDROID(d, f, u, g);
 }
