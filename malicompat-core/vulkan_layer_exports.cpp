@@ -154,6 +154,11 @@ std::once_flag g_init_flag;
 // M16: last vendor VkDevice created (for command-buffer-level proc resolution).
 VkDevice g_last_vendor_device = VK_NULL_HANDLE;
 
+// M17f: exact vendor procs saved at query time (identical to what the default
+// fallback would return). Wrappers call these; no plain ELF exports.
+PFN_vkAcquireImageANDROID g_exact_AcquireImage = nullptr;
+PFN_vkQueueSignalReleaseImageANDROID g_exact_SignalRelease = nullptr;
+
 // M15: queue->device tracking for submit resolution (defined here, used by
 // vkQueueSubmit below and populated by vkGetDeviceQueue further down).
 std::mutex g_queue_map_mutex;
@@ -1063,6 +1068,42 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
     if (std::strcmp(pName, "vkCreateGraphicsPipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateGraphicsPipelines);
     if (std::strcmp(pName, "vkCreateComputePipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateComputePipelines);
     if (std::strcmp(pName, "vkGetDeviceQueue") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetDeviceQueue);
+    // M17f: router-only passthrough (no plain exports). Resolve EXACTLY like
+    // this router's default fallback would; save + wrap on success, NULL else.
+    if (std::strcmp(pName, "vkAcquireImageANDROID") == 0) {
+        PFN_vkAcquireImageANDROID exact = nullptr;
+        if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+            exact = reinterpret_cast<PFN_vkAcquireImageANDROID>(
+                g_vendor_device->GetInstanceProcAddr(instance, "vkAcquireImageANDROID"));
+        }
+        if (!exact && g_vendor_vulkan) {
+            exact = reinterpret_cast<PFN_vkAcquireImageANDROID>(
+                dlsym(g_vendor_vulkan, "vkAcquireImageANDROID"));
+        }
+        if (exact) {
+            g_exact_AcquireImage = exact;
+            LOGI("M17f: vkAcquireImageANDROID exact=%p, wrapping", (void*)exact);
+            return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkAcquireImageANDROID);
+        }
+        return reinterpret_cast<PFN_vkVoidFunction>(exact);
+    }
+    if (std::strcmp(pName, "vkQueueSignalReleaseImageANDROID") == 0) {
+        PFN_vkQueueSignalReleaseImageANDROID exact = nullptr;
+        if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+            exact = reinterpret_cast<PFN_vkQueueSignalReleaseImageANDROID>(
+                g_vendor_device->GetInstanceProcAddr(instance, "vkQueueSignalReleaseImageANDROID"));
+        }
+        if (!exact && g_vendor_vulkan) {
+            exact = reinterpret_cast<PFN_vkQueueSignalReleaseImageANDROID>(
+                dlsym(g_vendor_vulkan, "vkQueueSignalReleaseImageANDROID"));
+        }
+        if (exact) {
+            g_exact_SignalRelease = exact;
+            LOGI("M17f: vkQueueSignalReleaseImageANDROID exact=%p, wrapping", (void*)exact);
+            return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkQueueSignalReleaseImageANDROID);
+        }
+        return reinterpret_cast<PFN_vkVoidFunction>(exact);
+    }
     // M17e: AcquireImage/SignalRelease interception reverted (bisect-proven
     // killer); GrallocUsage pair + default-fallback query logging retained.
     if (std::strcmp(pName, "vkGetSwapchainGrallocUsageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetSwapchainGrallocUsageANDROID);
@@ -1152,6 +1193,36 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
     if (std::strcmp(pName, "vkCreateGraphicsPipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateGraphicsPipelines);
     if (std::strcmp(pName, "vkCreateComputePipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateComputePipelines);
     if (std::strcmp(pName, "vkGetDeviceQueue") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetDeviceQueue);
+    // M17f: router-only passthrough (no plain exports). Resolve EXACTLY like
+    // this router's default fallback would (live instance); save + wrap.
+    if (std::strcmp(pName, "vkAcquireImageANDROID") == 0) {
+        PFN_vkAcquireImageANDROID exact = reinterpret_cast<PFN_vkAcquireImageANDROID>(
+            malicompat_vendor_proc("vkAcquireImageANDROID"));
+        if (!exact && g_vendor_vulkan) {
+            exact = reinterpret_cast<PFN_vkAcquireImageANDROID>(
+                dlsym(g_vendor_vulkan, "vkAcquireImageANDROID"));
+        }
+        if (exact) {
+            g_exact_AcquireImage = exact;
+            LOGI("M17f: vkAcquireImageANDROID exact=%p, wrapping", (void*)exact);
+            return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkAcquireImageANDROID);
+        }
+        return reinterpret_cast<PFN_vkVoidFunction>(exact);
+    }
+    if (std::strcmp(pName, "vkQueueSignalReleaseImageANDROID") == 0) {
+        PFN_vkQueueSignalReleaseImageANDROID exact = reinterpret_cast<PFN_vkQueueSignalReleaseImageANDROID>(
+            malicompat_vendor_proc("vkQueueSignalReleaseImageANDROID"));
+        if (!exact && g_vendor_vulkan) {
+            exact = reinterpret_cast<PFN_vkQueueSignalReleaseImageANDROID>(
+                dlsym(g_vendor_vulkan, "vkQueueSignalReleaseImageANDROID"));
+        }
+        if (exact) {
+            g_exact_SignalRelease = exact;
+            LOGI("M17f: vkQueueSignalReleaseImageANDROID exact=%p, wrapping", (void*)exact);
+            return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkQueueSignalReleaseImageANDROID);
+        }
+        return reinterpret_cast<PFN_vkVoidFunction>(exact);
+    }
     // M17e: AcquireImage/SignalRelease interception reverted (bisect-proven
     // killer); GrallocUsage pair + default-fallback query logging retained.
     if (std::strcmp(pName, "vkGetSwapchainGrallocUsageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetSwapchainGrallocUsageANDROID);
@@ -2133,8 +2204,12 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkAcquireImageANDROI
     VkFence fence) {
     InitRealVulkan();
     using Pfn = PFN_vkAcquireImageANDROID;
-    Pfn realFunc = reinterpret_cast<Pfn>(
-        malicompat_resolve_vendor_device_proc(device, "vkAcquireImageANDROID"));
+    // M17f: prefer the exact proc saved at query time (identical to default).
+    Pfn realFunc = g_exact_AcquireImage;
+    if (!realFunc) {
+        realFunc = reinterpret_cast<Pfn>(
+            malicompat_resolve_vendor_device_proc(device, "vkAcquireImageANDROID"));
+    }
     if (!realFunc) {
         realFunc = reinterpret_cast<Pfn>(malicompat_vendor_proc("vkAcquireImageANDROID"));
     }
@@ -2167,8 +2242,10 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueueSignalRelease
     int* pNativeFenceFd) {
     InitRealVulkan();
     using Pfn = PFN_vkQueueSignalReleaseImageANDROID;
-    Pfn realFunc = nullptr;
-    {
+    // M17f: prefer the exact proc saved at query time (identical to default).
+    // (falls through to the queue-map/device/instance/dlsym chain below)
+    Pfn realFunc = g_exact_SignalRelease;
+    if (!realFunc) {
         std::lock_guard<std::mutex> lock(g_queue_map_mutex);
         auto it = g_queue_to_device.find(queue);
         if (it != g_queue_to_device.end()) {
