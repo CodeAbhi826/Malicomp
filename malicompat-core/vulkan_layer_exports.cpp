@@ -1974,6 +1974,22 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionPro
     return pfn(l, c, p);
 }
 
+// M12: ICD entry points. Android's libvulkan loader (and adrenotools when our
+// .so is loaded AS the driver) resolves vk_icdGetInstanceProcAddr, NOT plain
+// vkGetInstanceProcAddr/vkCreateInstance. Without it the loader gets NULL for
+// every entry -> "No Vulkan physical devices available" with zero MaliCompat
+// logs (none of our code ever runs). Forward to our instance-proc router.
+MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName) {
+    return malicompat_vkGetInstanceProcAddr(instance, pName);
+}
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pVersion) {
+    if (pVersion) {
+        // Loader ICD interface: support up to v5, accept whatever loader asks.
+        if (*pVersion > 5) *pVersion = 5;
+    }
+    return VK_SUCCESS;
+}
+
 // WSI Exports (F1)
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateAndroidSurfaceKHR(VkInstance i, const VkAndroidSurfaceCreateInfoKHR* c, const VkAllocationCallbacks* a, VkSurfaceKHR* s) {
     return malicompat_vkCreateAndroidSurfaceKHR(i, c, a, s);
