@@ -6,6 +6,23 @@
 
 #define MALICOMPAT_EXPORT __attribute__((visibility("default")))
 
+// NDK Vulkan headers do not declare VK_ANDROID_native_buffer entry points
+// (they are HAL-loader private, resolved via GetProcAddr). Declare the exact
+// registry signatures locally for the M17 tracers.
+typedef VkFlags VkSwapchainImageUsageFlagsANDROID;
+typedef VkResult (VKAPI_PTR *PFN_vkGetSwapchainGrallocUsageANDROID)(
+    VkDevice device, VkFormat format, VkImageUsageFlags imageUsage, int* pGrallocUsage);
+typedef VkResult (VKAPI_PTR *PFN_vkGetSwapchainGrallocUsage2ANDROID)(
+    VkDevice device, VkFormat format, VkImageUsageFlags imageUsage,
+    VkSwapchainImageUsageFlagsANDROID swapchainImageUsage,
+    uint64_t* pGrallocConsumerUsage, uint64_t* pGrallocProducerUsage);
+typedef VkResult (VKAPI_PTR *PFN_vkAcquireImageANDROID)(
+    VkDevice device, VkImage image, int* pNativeFenceFd,
+    VkSemaphore semaphore, VkFence fence);
+typedef VkResult (VKAPI_PTR *PFN_vkQueueSignalReleaseImageANDROID)(
+    VkQueue queue, uint32_t waitSemaphoreCount, const VkSemaphore* pWaitSemaphores,
+    VkImage image, int* pNativeFenceFd);
+
 // Magic handle for virtualized query pools (occlusion suppression on ARM Mali)
 #define VIRTUAL_QUERY_POOL_HANDLE ((VkQueryPool)(uintptr_t)0xDEADBEEFULL)
 
