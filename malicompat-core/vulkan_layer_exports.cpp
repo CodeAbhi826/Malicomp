@@ -3,6 +3,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <unordered_map>
+#include <atomic>
 #include <mutex>
 #include <vector>
 #include <string>
@@ -1050,6 +1051,8 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
     if (std::strcmp(pName, "vkCreateShaderModule") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateShaderModule);
     if (std::strcmp(pName, "vkCreatePipelineLayout") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreatePipelineLayout);
     if (std::strcmp(pName, "vkCreatePipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreatePipelineCache);
+    if (std::strcmp(pName, "vkCreateGraphicsPipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateGraphicsPipelines);
+    if (std::strcmp(pName, "vkCreateComputePipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateComputePipelines);
     if (std::strcmp(pName, "vkDestroyPipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkDestroyPipelineCache);
     if (std::strcmp(pName, "vkGetPipelineCacheData") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetPipelineCacheData);
     if (std::strcmp(pName, "vkMergePipelineCaches") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkMergePipelineCaches);
@@ -1124,6 +1127,8 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
     if (std::strcmp(pName, "vkCreateShaderModule") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateShaderModule);
     if (std::strcmp(pName, "vkCreatePipelineLayout") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreatePipelineLayout);
     if (std::strcmp(pName, "vkCreatePipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreatePipelineCache);
+    if (std::strcmp(pName, "vkCreateGraphicsPipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateGraphicsPipelines);
+    if (std::strcmp(pName, "vkCreateComputePipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateComputePipelines);
     if (std::strcmp(pName, "vkDestroyPipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkDestroyPipelineCache);
     if (std::strcmp(pName, "vkGetPipelineCacheData") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetPipelineCacheData);
     if (std::strcmp(pName, "vkMergePipelineCaches") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkMergePipelineCaches);
@@ -1910,6 +1915,139 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkMergePipelineCache
     return VK_SUCCESS;
 }
 
+// M14: graphics/compute pipeline tracer. Logs the full create-info shape of
+// every pipeline (the Mali r15 driver SIGSEGVs inside vkCreateGraphicsPipelines
+// for the guest-output paint pipeline) then forwards unchanged (tracer only).
+namespace {
+std::atomic<uint32_t> g_pipeline_log_count{0};
+
+void malicompat_log_pnext_chain(const void* pNext, uint32_t depth = 0) {
+    const auto* node = reinterpret_cast<const VkBaseInStructure*>(pNext);
+    uint32_t i = 0;
+    while (node && i < 8) {
+        LOGI("  pipe pNext[%u] sType=%d", depth * 8 + i, static_cast<int>(node->sType));
+        node = node->pNext;
+        ++i;
+    }
+}
+}  // namespace
+
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateGraphicsPipelines(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    uint32_t createInfoCount,
+    const VkGraphicsPipelineCreateInfo* pCreateInfos,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipeline* pPipelines) {
+    InitRealVulkan();
+    uint32_t n = g_pipeline_log_count.fetch_add(1);
+    if (pCreateInfos) {
+        for (uint32_t k = 0; k < createInfoCount; ++k) {
+            const auto& ci = pCreateInfos[k];
+            LOGI("pipe#%u gfx[%u]: flags=0x%x stages=%u layout=%p renderPass=%p subpass=%u cache=%p baseIdx=%d",
+                 n, k, ci.flags, ci.stageCount, (const void*)ci.layout,
+                 (const void*)ci.renderPass, ci.subpass, (const void*)pipelineCache,
+                 ci.basePipelineIndex);
+            malicompat_log_pnext_chain(ci.pNext);
+            for (uint32_t s = 0; s < ci.stageCount; ++s) {
+                const auto& st = ci.pStages[s];
+                LOGI("  pipe#%u stage[%u]: bit=0x%x module=%p name='%s'",
+                     n, s, st.stage, (const void*)st.module, st.pName ? st.pName : "(null)");
+                malicompat_log_pnext_chain(st.pNext, 1);
+            }
+            if (ci.pVertexInputState) {
+                LOGI("  pipe#%u vertex: bindings=%u attribs=%u", n,
+                     ci.pVertexInputState->vertexBindingDescriptionCount,
+                     ci.pVertexInputState->vertexAttributeDescriptionCount);
+            } else { LOGI("  pipe#%u vertex: NULL", n); }
+            if (ci.pInputAssemblyState) {
+                LOGI("  pipe#%u inputAsm: topology=%d restart=%d", n,
+                     static_cast<int>(ci.pInputAssemblyState->topology),
+                     (int)ci.pInputAssemblyState->primitiveRestartEnable);
+            } else { LOGI("  pipe#%u inputAsm: NULL", n); }
+            if (ci.pTessellationState) {
+                LOGI("  pipe#%u tess: patches=%u", n, ci.pTessellationState->patchControlPoints);
+            }
+            if (ci.pViewportState) {
+                LOGI("  pipe#%u viewport: vp=%u sc=%u", n,
+                     ci.pViewportState->viewportCount, ci.pViewportState->scissorCount);
+            } else { LOGI("  pipe#%u viewport: NULL (dynamic?)", n); }
+            if (ci.pRasterizationState) {
+                const auto* rs = ci.pRasterizationState;
+                LOGI("  pipe#%u raster: polyMode=%d cull=0x%x front=%d clamp=%d discard=%d lineW=%f depthBias=%d",
+                     n, static_cast<int>(rs->polygonMode), rs->cullMode,
+                     static_cast<int>(rs->frontFace), (int)rs->depthClampEnable,
+                     (int)rs->rasterizerDiscardEnable, rs->lineWidth,
+                     (int)rs->depthBiasEnable);
+                malicompat_log_pnext_chain(rs->pNext, 1);
+            } else { LOGI("  pipe#%u raster: NULL", n); }
+            if (ci.pMultisampleState) {
+                const auto* ms = ci.pMultisampleState;
+                LOGI("  pipe#%u msaa: samples=0x%x shading=%d minSh=%f a2c=%d a2o=%d",
+                     n, ms->rasterizationSamples, (int)ms->sampleShadingEnable,
+                     ms->minSampleShading, (int)ms->alphaToCoverageEnable,
+                     (int)ms->alphaToOneEnable);
+            } else { LOGI("  pipe#%u msaa: NULL", n); }
+            if (ci.pDepthStencilState) {
+                const auto* ds = ci.pDepthStencilState;
+                LOGI("  pipe#%u depth: test=%d write=%d op=%d stencilTest=%d", n,
+                     (int)ds->depthTestEnable, (int)ds->depthWriteEnable,
+                     static_cast<int>(ds->depthCompareOp), (int)ds->stencilTestEnable);
+            } else { LOGI("  pipe#%u depth: NULL", n); }
+            if (ci.pColorBlendState) {
+                LOGI("  pipe#%u blend: logicOp=%d attachCount=%u", n,
+                     (int)ci.pColorBlendState->logicOpEnable,
+                     ci.pColorBlendState->attachmentCount);
+                for (uint32_t a = 0; a < ci.pColorBlendState->attachmentCount && a < 4; ++a) {
+                    const auto& at = ci.pColorBlendState->pAttachments[a];
+                    LOGI("  pipe#%u blend[%u]: en=%d mask=0x%x", n, a,
+                         (int)at.blendEnable, at.colorWriteMask);
+                }
+            } else { LOGI("  pipe#%u blend: NULL", n); }
+            if (ci.pDynamicState) {
+                LOGI("  pipe#%u dynamic: count=%u", n, ci.pDynamicState->dynamicStateCount);
+            }
+        }
+    }
+    PFN_vkCreateGraphicsPipelines realFunc = reinterpret_cast<PFN_vkCreateGraphicsPipelines>(
+        malicompat_vendor_proc("vkCreateGraphicsPipelines"));
+    if (!realFunc && g_vendor_vulkan) {
+        realFunc = reinterpret_cast<PFN_vkCreateGraphicsPipelines>(
+            dlsym(g_vendor_vulkan, "vkCreateGraphicsPipelines"));
+    }
+    if (!realFunc) {
+        LOGE("pipe#%u: no vendor vkCreateGraphicsPipelines", n);
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    LOGI("pipe#%u: forwarding %u gfx infos to vendor", n, createInfoCount);
+    VkResult res = realFunc(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+    LOGI("pipe#%u: vendor returned %d", n, res);
+    return res;
+}
+
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateComputePipelines(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    uint32_t createInfoCount,
+    const VkComputePipelineCreateInfo* pCreateInfos,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipeline* pPipelines) {
+    InitRealVulkan();
+    uint32_t n = g_pipeline_log_count.fetch_add(1);
+    LOGI("pipe#%u: %u compute infos cache=%p", n, createInfoCount, (const void*)pipelineCache);
+    PFN_vkCreateComputePipelines realFunc = reinterpret_cast<PFN_vkCreateComputePipelines>(
+        malicompat_vendor_proc("vkCreateComputePipelines"));
+    if (!realFunc && g_vendor_vulkan) {
+        realFunc = reinterpret_cast<PFN_vkCreateComputePipelines>(
+            dlsym(g_vendor_vulkan, "vkCreateComputePipelines"));
+    }
+    if (!realFunc) {
+        LOGE("pipe#%u: no vendor vkCreateComputePipelines", n);
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    return realFunc(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+}
+
 
 // Standard exported Vulkan symbols for direct dynamic linker binding
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorPool(VkDevice d, const VkDescriptorPoolCreateInfo* c, const VkAllocationCallbacks* a, VkDescriptorPool* p) {
@@ -2101,6 +2239,13 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkGetPipelineCacheData(VkDevice
 
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkMergePipelineCaches(VkDevice device, VkPipelineCache dstCache, uint32_t srcCacheCount, const VkPipelineCache* pSrcCaches) {
     return malicompat_vkMergePipelineCaches(device, dstCache, srcCacheCount, pSrcCaches);
+}
+
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(VkDevice device, VkPipelineCache cache, uint32_t count, const VkGraphicsPipelineCreateInfo* infos, const VkAllocationCallbacks* alloc, VkPipeline* pipes) {
+    return malicompat_vkCreateGraphicsPipelines(device, cache, count, infos, alloc, pipes);
+}
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(VkDevice device, VkPipelineCache cache, uint32_t count, const VkComputePipelineCreateInfo* infos, const VkAllocationCallbacks* alloc, VkPipeline* pipes) {
+    return malicompat_vkCreateComputePipelines(device, cache, count, infos, alloc, pipes);
 }
 
 } // extern "C"

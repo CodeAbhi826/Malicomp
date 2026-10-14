@@ -280,6 +280,22 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkMergePipelineCache
     uint32_t srcCacheCount,
     const VkPipelineCache* pSrcCaches);
 
+// M14: graphics/compute pipeline create tracer (find G71 killer in paint pipeline).
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateGraphicsPipelines(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    uint32_t createInfoCount,
+    const VkGraphicsPipelineCreateInfo* pCreateInfos,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipeline* pPipelines);
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateComputePipelines(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    uint32_t createInfoCount,
+    const VkComputePipelineCreateInfo* pCreateInfos,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipeline* pPipelines);
+
 // Standard Vulkan entry points for direct dynamic linker binding
 MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName);
 MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName);
