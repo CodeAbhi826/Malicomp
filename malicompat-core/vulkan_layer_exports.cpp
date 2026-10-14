@@ -1063,9 +1063,8 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
     if (std::strcmp(pName, "vkCreateGraphicsPipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateGraphicsPipelines);
     if (std::strcmp(pName, "vkCreateComputePipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateComputePipelines);
     if (std::strcmp(pName, "vkGetDeviceQueue") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetDeviceQueue);
-    // M17: loader-terminated WSI needs these from the driver (not the system loader).
-    if (std::strcmp(pName, "vkAcquireImageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkAcquireImageANDROID);
-    if (std::strcmp(pName, "vkQueueSignalReleaseImageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkQueueSignalReleaseImageANDROID);
+    // M17b: GrallocUsage(+2) proven safe (fires OK); AcquireImage/SignalRelease
+    // reverted pending single re-add (bisect).
     if (std::strcmp(pName, "vkGetSwapchainGrallocUsageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetSwapchainGrallocUsageANDROID);
     if (std::strcmp(pName, "vkGetSwapchainGrallocUsage2ANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetSwapchainGrallocUsage2ANDROID);
     if (std::strcmp(pName, "vkDestroyPipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkDestroyPipelineCache);
@@ -1145,9 +1144,8 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
     if (std::strcmp(pName, "vkCreateGraphicsPipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateGraphicsPipelines);
     if (std::strcmp(pName, "vkCreateComputePipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateComputePipelines);
     if (std::strcmp(pName, "vkGetDeviceQueue") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetDeviceQueue);
-    // M17: loader-terminated WSI needs these from the driver (not the system loader).
-    if (std::strcmp(pName, "vkAcquireImageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkAcquireImageANDROID);
-    if (std::strcmp(pName, "vkQueueSignalReleaseImageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkQueueSignalReleaseImageANDROID);
+    // M17b: GrallocUsage(+2) proven safe (fires OK); AcquireImage/SignalRelease
+    // reverted pending single re-add (bisect).
     if (std::strcmp(pName, "vkGetSwapchainGrallocUsageANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetSwapchainGrallocUsageANDROID);
     if (std::strcmp(pName, "vkGetSwapchainGrallocUsage2ANDROID") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetSwapchainGrallocUsage2ANDROID);
     if (std::strcmp(pName, "vkDestroyPipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkDestroyPipelineCache);
@@ -2471,13 +2469,8 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(VkDevi
 MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(VkDevice device, uint32_t family, uint32_t index, VkQueue* q) {
     malicompat_vkGetDeviceQueue(device, family, index, q);
 }
-// M17: VK_ANDROID_native_buffer direct bindings.
-MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkAcquireImageANDROID(VkDevice d, VkImage img, int* fd, VkSemaphore s, VkFence f) {
-    return malicompat_vkAcquireImageANDROID(d, img, fd, s, f);
-}
-MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkQueueSignalReleaseImageANDROID(VkQueue q, uint32_t n, const VkSemaphore* s, VkImage img, int* fd) {
-    return malicompat_vkQueueSignalReleaseImageANDROID(q, n, s, img, fd);
-}
+// M17: VK_ANDROID_native_buffer direct bindings (GrallocUsage pair only;
+// AcquireImage/SignalRelease reverted in M17b bisect).
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkGetSwapchainGrallocUsageANDROID(VkDevice d, VkFormat f, VkImageUsageFlags u, int* g) {
     return malicompat_vkGetSwapchainGrallocUsageANDROID(d, f, u, g);
 }
