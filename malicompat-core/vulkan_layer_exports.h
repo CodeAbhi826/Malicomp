@@ -304,6 +304,35 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetDeviceQueue(
     uint32_t queueIndex,
     VkQueue* pQueue);
 
+// M17: VK_ANDROID_native_buffer tracers. Android's loader terminates the
+// KHR_swapchain entry points internally and calls INTO the driver for these.
+// This is where 19.8k acquires went while 0 presents surfaced: if SignalRelease
+// fails, the loader cancelBuffer()s instead of queueBuffer() (black screen).
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkAcquireImageANDROID(
+    VkDevice device,
+    VkImage image,
+    int* pNativeFenceFd,
+    VkSemaphore semaphore,
+    VkFence fence);
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueueSignalReleaseImageANDROID(
+    VkQueue queue,
+    uint32_t waitSemaphoreCount,
+    const VkSemaphore* pWaitSemaphores,
+    VkImage image,
+    int* pNativeFenceFd);
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkGetSwapchainGrallocUsageANDROID(
+    VkDevice device,
+    VkFormat format,
+    VkImageUsageFlags imageUsage,
+    int* pGrallocUsage);
+MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkGetSwapchainGrallocUsage2ANDROID(
+    VkDevice device,
+    VkFormat format,
+    VkImageUsageFlags imageUsage,
+    VkSwapchainImageUsageFlagsANDROID swapchainImageUsage,
+    uint64_t* pGrallocConsumerUsage,
+    uint64_t* pGrallocProducerUsage);
+
 // Standard Vulkan entry points for direct dynamic linker binding
 MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName);
 MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName);
