@@ -151,6 +151,11 @@ PFN_vkQueuePresentKHR g_system_vkQueuePresentKHR = nullptr;
 
 std::once_flag g_init_flag;
 
+// M15: queue->device tracking for submit resolution (defined here, used by
+// vkQueueSubmit below and populated by vkGetDeviceQueue further down).
+std::mutex g_queue_map_mutex;
+std::unordered_map<VkQueue, VkDevice> g_queue_to_device;
+
 bool malicompat_is_wsi_symbol(const char* pName) {
     if (!pName) return false;
     static const char* const kWsiSymbols[] = {
@@ -2067,11 +2072,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateComputePipel
     return realFunc(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
 }
 
-// M15: queue->device tracking for submit resolution.
-namespace {
-std::mutex g_queue_map_mutex;
-std::unordered_map<VkQueue, VkDevice> g_queue_to_device;
-}  // namespace
+// M15: queue map storage lives near the top with the other globals.
 
 MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetDeviceQueue(
     VkDevice device,
