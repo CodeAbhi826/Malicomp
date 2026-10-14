@@ -2468,7 +2468,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(VkDev
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(VkDevice device, VkPipelineCache cache, uint32_t count, const VkComputePipelineCreateInfo* infos, const VkAllocationCallbacks* alloc, VkPipeline* pipes) {
     return malicompat_vkCreateComputePipelines(device, cache, count, infos, alloc, pipes);
 }
-MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkGetDeviceQueue(VkDevice device, uint32_t family, uint32_t index, VkQueue* q) {
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(VkDevice device, uint32_t family, uint32_t index, VkQueue* q) {
     malicompat_vkGetDeviceQueue(device, family, index, q);
 }
 // M17: VK_ANDROID_native_buffer direct bindings.
