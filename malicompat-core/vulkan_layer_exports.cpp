@@ -1102,12 +1102,20 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
     }
 
     // Default: forward hardware rasterization / compute calls to vendor Mali driver
+    // M17d: query logging with ZERO behavior change (log name + resolved ptr).
     PFN_vkVoidFunction pfn = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         pfn = g_vendor_device->GetInstanceProcAddr(instance, pName);
     }
     if (!pfn && g_vendor_vulkan) {
         pfn = reinterpret_cast<PFN_vkVoidFunction>(dlsym(g_vendor_vulkan, pName));
+    }
+    {
+        static uint32_t s_qlog = 0;
+        if (s_qlog < 300) {
+            ++s_qlog;
+            LOGI("GetInstanceProcAddr default: '%s' -> %p", pName, pfn);
+        }
     }
     return pfn;
 }
@@ -1178,9 +1186,17 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
     // Default: forward to vendor driver. M7: resolve via the live instance
     // (NULL gives crippled results on this driver); without it the SDK fails
     // to load device functions and CreateIfSupported returns null.
+    // M17d: query logging with ZERO behavior change.
     PFN_vkVoidFunction pfn = malicompat_vendor_proc(pName);
     if (!pfn && g_vendor_vulkan) {
         pfn = reinterpret_cast<PFN_vkVoidFunction>(dlsym(g_vendor_vulkan, pName));
+    }
+    {
+        static uint32_t s_qlog = 0;
+        if (s_qlog < 300) {
+            ++s_qlog;
+            LOGI("GetDeviceProcAddr default: '%s' -> %p", pName, pfn);
+        }
     }
     return pfn;
 }
