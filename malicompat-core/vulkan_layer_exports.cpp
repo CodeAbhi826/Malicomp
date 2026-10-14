@@ -151,6 +151,9 @@ PFN_vkQueuePresentKHR g_system_vkQueuePresentKHR = nullptr;
 
 std::once_flag g_init_flag;
 
+// M16: last vendor VkDevice created (for command-buffer-level proc resolution).
+VkDevice g_last_vendor_device = VK_NULL_HANDLE;
+
 // M15: queue->device tracking for submit resolution (defined here, used by
 // vkQueueSubmit below and populated by vkGetDeviceQueue further down).
 std::mutex g_queue_map_mutex;
@@ -932,6 +935,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
 
     // Initialize dummy fallback resources on the newly created device (F8)
     if (res == VK_SUCCESS && pDevice && *pDevice) {
+        g_last_vendor_device = *pDevice;
         malicompat::VulkanDescriptorShim::Instance().InitializeDeviceResources(*pDevice, physicalDevice);
     }
 
@@ -1174,7 +1178,11 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDescriptorPo
     VkDescriptorPool* pDescriptorPool) {
     InitRealVulkan();
     PFN_vkCreateDescriptorPool realPfn = nullptr;
-    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+    // M16: instance-query/dlsym are NULL for this on Mali r15 HAL mode;
+    // resolve in the vendor device domain first (same class as M15).
+    realPfn = reinterpret_cast<PFN_vkCreateDescriptorPool>(
+        malicompat_resolve_vendor_device_proc(device, "vkCreateDescriptorPool"));
+    if (!realPfn && g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realPfn = reinterpret_cast<PFN_vkCreateDescriptorPool>(
             g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateDescriptorPool"));
     }
@@ -1218,9 +1226,13 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkAllocateDescriptor
     const VkDescriptorSetAllocateInfo* pAllocateInfo,
     VkDescriptorSet* pDescriptorSets) {
     InitRealVulkan();
-    // M13: same NULL-dlsym hazard as layouts; resolve via live instance first.
+    // M16: device-domain first (instance-query may be NULL on Mali r15).
     PFN_vkAllocateDescriptorSets realPfn = reinterpret_cast<PFN_vkAllocateDescriptorSets>(
-        malicompat_vendor_proc("vkAllocateDescriptorSets"));
+        malicompat_resolve_vendor_device_proc(device, "vkAllocateDescriptorSets"));
+    if (!realPfn) {
+        realPfn = reinterpret_cast<PFN_vkAllocateDescriptorSets>(
+            malicompat_vendor_proc("vkAllocateDescriptorSets"));
+    }
     if (!realPfn) realPfn = g_vendor_vkAllocateDescriptorSets;
     if (!realPfn && g_vendor_vulkan) {
         realPfn = reinterpret_cast<PFN_vkAllocateDescriptorSets>(
@@ -1242,8 +1254,13 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkUpdateDescriptorSets(
     const VkCopyDescriptorSet* pDescriptorCopies) {
     InitRealVulkan();
     // M13: resolve update proc via live instance first (dlsym may be NULL).
+    // M16: device-domain first (instance-query may be NULL on Mali r15).
     PFN_vkUpdateDescriptorSets realUpdate = reinterpret_cast<PFN_vkUpdateDescriptorSets>(
-        malicompat_vendor_proc("vkUpdateDescriptorSets"));
+        malicompat_resolve_vendor_device_proc(device, "vkUpdateDescriptorSets"));
+    if (!realUpdate) {
+        realUpdate = reinterpret_cast<PFN_vkUpdateDescriptorSets>(
+            malicompat_vendor_proc("vkUpdateDescriptorSets"));
+    }
     if (!realUpdate) realUpdate = g_vendor_vkUpdateDescriptorSets;
     if (!realUpdate && g_vendor_vulkan) {
         realUpdate = reinterpret_cast<PFN_vkUpdateDescriptorSets>(
@@ -1268,8 +1285,17 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdBindDescriptorSets(
     const uint32_t* pDynamicOffsets) {
     InitRealVulkan();
     // M13: resolve bind proc via live instance first (dlsym may be NULL).
-    PFN_vkCmdBindDescriptorSets realBind = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(
-        malicompat_vendor_proc("vkCmdBindDescriptorSets"));
+    // M16: command buffers carry no device; use the last created vendor device
+    // for domain-correct resolution first.
+    PFN_vkCmdBindDescriptorSets realBind = nullptr;
+    if (g_last_vendor_device != VK_NULL_HANDLE) {
+        realBind = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(
+            malicompat_resolve_vendor_device_proc(g_last_vendor_device, "vkCmdBindDescriptorSets"));
+    }
+    if (!realBind) {
+        realBind = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(
+            malicompat_vendor_proc("vkCmdBindDescriptorSets"));
+    }
     if (!realBind) realBind = g_vendor_vkCmdBindDescriptorSets;
     if (!realBind && g_vendor_vulkan) {
         realBind = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(
