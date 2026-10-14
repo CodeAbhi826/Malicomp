@@ -1183,8 +1183,22 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDescriptorSe
     const VkAllocationCallbacks* pAllocator,
     VkDescriptorSetLayout* pSetLayout) {
     InitRealVulkan();
+    // M13: g_vendor_vkCreateDescriptorSetLayout comes from dlsym on the HAL
+    // .so, which is NULL in HAL mode (device procs only via GetProcAddr).
+    // Resolve against the live instance first, like the pool wrapper does.
+    PFN_vkCreateDescriptorSetLayout realPfn = reinterpret_cast<PFN_vkCreateDescriptorSetLayout>(
+        malicompat_vendor_proc("vkCreateDescriptorSetLayout"));
+    if (!realPfn) realPfn = g_vendor_vkCreateDescriptorSetLayout;
+    if (!realPfn && g_vendor_vulkan) {
+        realPfn = reinterpret_cast<PFN_vkCreateDescriptorSetLayout>(
+            dlsym(g_vendor_vulkan, "vkCreateDescriptorSetLayout"));
+    }
+    if (!realPfn) {
+        LOGE("vkCreateDescriptorSetLayout: no vendor proc (HAL dlsym + GetProcAddr both null)");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
     return malicompat::VulkanDescriptorShim::Instance().InterceptCreateDescriptorSetLayout(
-        device, pCreateInfo, pAllocator, pSetLayout, g_vendor_vkCreateDescriptorSetLayout);
+        device, pCreateInfo, pAllocator, pSetLayout, realPfn);
 }
 
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkAllocateDescriptorSets(
@@ -1192,8 +1206,20 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkAllocateDescriptor
     const VkDescriptorSetAllocateInfo* pAllocateInfo,
     VkDescriptorSet* pDescriptorSets) {
     InitRealVulkan();
+    // M13: same NULL-dlsym hazard as layouts; resolve via live instance first.
+    PFN_vkAllocateDescriptorSets realPfn = reinterpret_cast<PFN_vkAllocateDescriptorSets>(
+        malicompat_vendor_proc("vkAllocateDescriptorSets"));
+    if (!realPfn) realPfn = g_vendor_vkAllocateDescriptorSets;
+    if (!realPfn && g_vendor_vulkan) {
+        realPfn = reinterpret_cast<PFN_vkAllocateDescriptorSets>(
+            dlsym(g_vendor_vulkan, "vkAllocateDescriptorSets"));
+    }
+    if (!realPfn) {
+        LOGE("vkAllocateDescriptorSets: no vendor proc");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
     return malicompat::VulkanDescriptorShim::Instance().InterceptAllocateDescriptorSets(
-        device, pAllocateInfo, pDescriptorSets, g_vendor_vkAllocateDescriptorSets);
+        device, pAllocateInfo, pDescriptorSets, realPfn);
 }
 
 MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkUpdateDescriptorSets(
@@ -1203,8 +1229,20 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkUpdateDescriptorSets(
     uint32_t descriptorCopyCount,
     const VkCopyDescriptorSet* pDescriptorCopies) {
     InitRealVulkan();
+    // M13: resolve update proc via live instance first (dlsym may be NULL).
+    PFN_vkUpdateDescriptorSets realUpdate = reinterpret_cast<PFN_vkUpdateDescriptorSets>(
+        malicompat_vendor_proc("vkUpdateDescriptorSets"));
+    if (!realUpdate) realUpdate = g_vendor_vkUpdateDescriptorSets;
+    if (!realUpdate && g_vendor_vulkan) {
+        realUpdate = reinterpret_cast<PFN_vkUpdateDescriptorSets>(
+            dlsym(g_vendor_vulkan, "vkUpdateDescriptorSets"));
+    }
+    if (!realUpdate) {
+        LOGE("vkUpdateDescriptorSets: no vendor proc");
+        return;
+    }
     malicompat::VulkanDescriptorShim::Instance().InterceptUpdateDescriptorSets(
-        device, descriptorWriteCount, pDescriptorWrites, descriptorCopyCount, pDescriptorCopies, g_vendor_vkUpdateDescriptorSets);
+        device, descriptorWriteCount, pDescriptorWrites, descriptorCopyCount, pDescriptorCopies, realUpdate);
 }
 
 MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdBindDescriptorSets(
@@ -1217,8 +1255,20 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdBindDescriptorSets(
     uint32_t dynamicOffsetCount,
     const uint32_t* pDynamicOffsets) {
     InitRealVulkan();
+    // M13: resolve bind proc via live instance first (dlsym may be NULL).
+    PFN_vkCmdBindDescriptorSets realBind = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(
+        malicompat_vendor_proc("vkCmdBindDescriptorSets"));
+    if (!realBind) realBind = g_vendor_vkCmdBindDescriptorSets;
+    if (!realBind && g_vendor_vulkan) {
+        realBind = reinterpret_cast<PFN_vkCmdBindDescriptorSets>(
+            dlsym(g_vendor_vulkan, "vkCmdBindDescriptorSets"));
+    }
+    if (!realBind) {
+        LOGE("vkCmdBindDescriptorSets: no vendor proc");
+        return;
+    }
     malicompat::VulkanDescriptorShim::Instance().InterceptCmdBindDescriptorSets(
-        commandBuffer, pipelineBindPoint, layout, firstSet, descriptorSetCount, pDescriptorSets, dynamicOffsetCount, pDynamicOffsets, g_vendor_vkCmdBindDescriptorSets);
+        commandBuffer, pipelineBindPoint, layout, firstSet, descriptorSetCount, pDescriptorSets, dynamicOffsetCount, pDynamicOffsets, realBind);
 }
 
 // Query Interception: Safe Virtual Query Pool Handler (F6)
