@@ -1053,6 +1053,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
     if (std::strcmp(pName, "vkCreatePipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreatePipelineCache);
     if (std::strcmp(pName, "vkCreateGraphicsPipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateGraphicsPipelines);
     if (std::strcmp(pName, "vkCreateComputePipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateComputePipelines);
+    if (std::strcmp(pName, "vkGetDeviceQueue") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetDeviceQueue);
     if (std::strcmp(pName, "vkDestroyPipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkDestroyPipelineCache);
     if (std::strcmp(pName, "vkGetPipelineCacheData") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetPipelineCacheData);
     if (std::strcmp(pName, "vkMergePipelineCaches") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkMergePipelineCaches);
@@ -1129,6 +1130,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
     if (std::strcmp(pName, "vkCreatePipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreatePipelineCache);
     if (std::strcmp(pName, "vkCreateGraphicsPipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateGraphicsPipelines);
     if (std::strcmp(pName, "vkCreateComputePipelines") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateComputePipelines);
+    if (std::strcmp(pName, "vkGetDeviceQueue") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetDeviceQueue);
     if (std::strcmp(pName, "vkDestroyPipelineCache") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkDestroyPipelineCache);
     if (std::strcmp(pName, "vkGetPipelineCacheData") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetPipelineCacheData);
     if (std::strcmp(pName, "vkMergePipelineCaches") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkMergePipelineCaches);
@@ -1728,7 +1730,17 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueueSubmit(
     static uint32_t s_submit_count = 0;
     ++s_submit_count;
     PFN_vkQueueSubmit realSubmit = nullptr;
-    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+    // M15: resolve in the queue's device domain first (instance-query is NULL
+    // for device procs on Mali r15; the old fallback silently dropped submits).
+    {
+        std::lock_guard<std::mutex> lock(g_queue_map_mutex);
+        auto it = g_queue_to_device.find(queue);
+        if (it != g_queue_to_device.end()) {
+            realSubmit = reinterpret_cast<PFN_vkQueueSubmit>(
+                malicompat_resolve_vendor_device_proc(it->second, "vkQueueSubmit"));
+        }
+    }
+    if (!realSubmit && g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realSubmit = reinterpret_cast<PFN_vkQueueSubmit>(
             malicompat_vendor_proc("vkQueueSubmit"));
     }
@@ -1795,10 +1807,11 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreatePipelineLayo
         sanitizedInfo.setLayoutCount = 4;
     }
 
-    PFN_vkCreatePipelineLayout realFunc = nullptr;
-    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+    PFN_vkCreatePipelineLayout realFunc = reinterpret_cast<PFN_vkCreatePipelineLayout>(
+        malicompat_resolve_vendor_device_proc(device, "vkCreatePipelineLayout"));
+    if (!realFunc) {
         realFunc = reinterpret_cast<PFN_vkCreatePipelineLayout>(
-            g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkCreatePipelineLayout"));
+            malicompat_vendor_proc("vkCreatePipelineLayout"));
     }
     if (!realFunc && g_vendor_vkCreatePipelineLayout) {
         realFunc = g_vendor_vkCreatePipelineLayout;
@@ -1811,11 +1824,9 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreatePipelineLayo
         return realFunc(device, &sanitizedInfo, pAllocator, pPipelineLayout);
     }
 
-    LOGW("malicompat_vkCreatePipelineLayout: vendor vkCreatePipelineLayout unresolvable, returning mock handle");
-    if (pPipelineLayout) {
-        *pPipelineLayout = reinterpret_cast<VkPipelineLayout>(0x401234);
-    }
-    return VK_SUCCESS;
+    // M15: never return mock handles (0x401234 crashed Mali in pipeline init).
+    LOGE("malicompat_vkCreatePipelineLayout: vendor proc unresolvable, failing loud");
+    return VK_ERROR_INITIALIZATION_FAILED;
 }
 
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreatePipelineCache(
@@ -2010,7 +2021,11 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateGraphicsPipe
         }
     }
     PFN_vkCreateGraphicsPipelines realFunc = reinterpret_cast<PFN_vkCreateGraphicsPipelines>(
-        malicompat_vendor_proc("vkCreateGraphicsPipelines"));
+        malicompat_resolve_vendor_device_proc(device, "vkCreateGraphicsPipelines"));
+    if (!realFunc) {
+        realFunc = reinterpret_cast<PFN_vkCreateGraphicsPipelines>(
+            malicompat_vendor_proc("vkCreateGraphicsPipelines"));
+    }
     if (!realFunc && g_vendor_vulkan) {
         realFunc = reinterpret_cast<PFN_vkCreateGraphicsPipelines>(
             dlsym(g_vendor_vulkan, "vkCreateGraphicsPipelines"));
@@ -2036,7 +2051,11 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateComputePipel
     uint32_t n = g_pipeline_log_count.fetch_add(1);
     LOGI("pipe#%u: %u compute infos cache=%p", n, createInfoCount, (const void*)pipelineCache);
     PFN_vkCreateComputePipelines realFunc = reinterpret_cast<PFN_vkCreateComputePipelines>(
-        malicompat_vendor_proc("vkCreateComputePipelines"));
+        malicompat_resolve_vendor_device_proc(device, "vkCreateComputePipelines"));
+    if (!realFunc) {
+        realFunc = reinterpret_cast<PFN_vkCreateComputePipelines>(
+            malicompat_vendor_proc("vkCreateComputePipelines"));
+    }
     if (!realFunc && g_vendor_vulkan) {
         realFunc = reinterpret_cast<PFN_vkCreateComputePipelines>(
             dlsym(g_vendor_vulkan, "vkCreateComputePipelines"));
@@ -2046,6 +2065,41 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateComputePipel
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     return realFunc(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+}
+
+// M15: queue->device tracking for submit resolution.
+namespace {
+std::mutex g_queue_map_mutex;
+std::unordered_map<VkQueue, VkDevice> g_queue_to_device;
+}  // namespace
+
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetDeviceQueue(
+    VkDevice device,
+    uint32_t queueFamilyIndex,
+    uint32_t queueIndex,
+    VkQueue* pQueue) {
+    InitRealVulkan();
+    PFN_vkGetDeviceQueue realFunc = reinterpret_cast<PFN_vkGetDeviceQueue>(
+        malicompat_resolve_vendor_device_proc(device, "vkGetDeviceQueue"));
+    if (!realFunc) {
+        realFunc = reinterpret_cast<PFN_vkGetDeviceQueue>(
+            malicompat_vendor_proc("vkGetDeviceQueue"));
+    }
+    if (!realFunc && g_vendor_vulkan) {
+        realFunc = reinterpret_cast<PFN_vkGetDeviceQueue>(
+            dlsym(g_vendor_vulkan, "vkGetDeviceQueue"));
+    }
+    if (!realFunc || !pQueue) {
+        LOGE("vkGetDeviceQueue: no vendor proc (queueFamily=%u index=%u)", queueFamilyIndex, queueIndex);
+        return;
+    }
+    realFunc(device, queueFamilyIndex, queueIndex, pQueue);
+    if (*pQueue) {
+        std::lock_guard<std::mutex> lock(g_queue_map_mutex);
+        g_queue_to_device[*pQueue] = device;
+        LOGI("vkGetDeviceQueue: family=%u index=%u queue=%p device=%p",
+             queueFamilyIndex, queueIndex, (const void*)*pQueue, (const void*)device);
+    }
 }
 
 
@@ -2246,6 +2300,9 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(VkDev
 }
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(VkDevice device, VkPipelineCache cache, uint32_t count, const VkComputePipelineCreateInfo* infos, const VkAllocationCallbacks* alloc, VkPipeline* pipes) {
     return malicompat_vkCreateComputePipelines(device, cache, count, infos, alloc, pipes);
+}
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(VkDevice device, uint32_t family, uint32_t index, VkQueue* q) {
+    malicompat_vkGetDeviceQueue(device, family, index, q);
 }
 
 } // extern "C"

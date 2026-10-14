@@ -1,4 +1,5 @@
 #include "spirv_remapper.h"
+#include "vulkan_layer_exports.h"
 #include <unordered_map>
 #include <cstring>
 #include <cstdio>
@@ -189,16 +190,18 @@ VkResult SpirvRemapper::InterceptCreateShaderModule(
             if (realCreateShaderModule) {
                 return realCreateShaderModule(device, &modifiedInfo, pAllocator, pShaderModule);
             }
-            *pShaderModule = reinterpret_cast<VkShaderModule>(0x501234);
-            return VK_SUCCESS;
+            // M15: never hand out fake handles; the old 0x501234 mock crashed
+            // the Mali driver inside vkCreateGraphicsPipelines (fault 0x401244).
+            LOGE("InterceptCreateShaderModule: no vendor proc, failing loud");
+            return VK_ERROR_INITIALIZATION_FAILED;
         }
     }
 
     if (realCreateShaderModule) {
         return realCreateShaderModule(device, pCreateInfo, pAllocator, pShaderModule);
     }
-    *pShaderModule = reinterpret_cast<VkShaderModule>(0x501234);
-    return VK_SUCCESS;
+    LOGE("InterceptCreateShaderModule: no vendor proc for passthrough, failing loud");
+    return VK_ERROR_INITIALIZATION_FAILED;
 }
 
 } // namespace malicompat
@@ -210,9 +213,13 @@ VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateShaderModule(
     const VkShaderModuleCreateInfo* pCreateInfo,
     const VkAllocationCallbacks* pAllocator,
     VkShaderModule* pShaderModule) {
-    // Forward to instance with null real function pointer if standalone
+    // M15: resolve the vendor proc in the vendor dispatch domain (M6 helper)
+    // instead of passing nullptr (which minted fake 0x501234 handles that
+    // crashed Mali inside vkCreateGraphicsPipelines).
+    PFN_vkCreateShaderModule realCreate = reinterpret_cast<PFN_vkCreateShaderModule>(
+        malicompat_resolve_vendor_device_proc(device, "vkCreateShaderModule"));
     return malicompat::SpirvRemapper::Instance().InterceptCreateShaderModule(
-        device, pCreateInfo, pAllocator, pShaderModule, nullptr);
+        device, pCreateInfo, pAllocator, pShaderModule, realCreate);
 }
 
 } // extern "C"
