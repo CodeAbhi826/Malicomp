@@ -1109,6 +1109,105 @@ static const char* const kCoreFeatureNames[55] = {
     "variablePointersStorageBuffer", "variablePointers",
 };
 
+// A1: one-time dump of every descriptor limit that constrains the bindless
+// heaps, plus a per-binding overflow verdict at vkCreateDescriptorSetLayout.
+//
+// Why: the guest asks for SAMPLED_IMAGE x 4096 and SAMPLER x 512. This device
+// reports maxPerStageDescriptorSampledImages = 256 and maxPerStageDescriptorSamplers
+// = 128, and the vendor reports descriptorIndexing = 0 (M24), so both bindings are
+// illegal and every geometry pipeline returns VK_ERROR_INITIALIZATION_FAILED --
+// "C6: no se pudo crear un pipeline (causa 53)".
+//
+// Option A is to chunk those heaps. The chunk arithmetic cannot be guessed: the
+// per-stage limits are totals across every binding a stage declares, not per
+// binding, so we need the real numbers before splitting anything. This logs them,
+// and for each offending binding reports the overflow and the chunk count that
+// would be required.
+namespace malicompat_a1 {
+struct Limits {
+    bool done = false;
+    VkPhysicalDevice physDev = VK_NULL_HANDLE;
+    uint32_t maxPerStageSamplers = 0;
+    uint32_t maxPerStageSampledImages = 0;
+    uint32_t maxPerStageStorageBuffers = 0;
+    uint32_t maxPerStageUniformBuffers = 0;
+    uint32_t maxPerStageResources = 0;
+    uint32_t maxDescriptorSetSamplers = 0;
+    uint32_t maxDescriptorSetSampledImages = 0;
+};
+static Limits lim_;
+// Captured at vkCreateDevice: that is the only entry point that receives a
+// VkPhysicalDevice. Descriptor set layouts only get a VkDevice.
+static VkPhysicalDevice g_a1_phys_dev = VK_NULL_HANDLE;
+
+static void DumpLimitsOnce(VkPhysicalDevice physDev) {
+    if (lim_.done || !physDev) return;  // retry later if physDev not captured yet
+    lim_.done = true;
+    VkPhysicalDeviceProperties props = {};
+    PFN_vkGetPhysicalDeviceProperties p1 = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+        g_vendor_device && g_vendor_device->GetInstanceProcAddr
+            ? malicompat_vendor_proc("vkGetPhysicalDeviceProperties") : nullptr);
+    if (!p1) p1 = g_vendor_vkGetPhysicalDeviceProperties;
+    if (!p1) {
+        LOGI("A1: could not resolve vkGetPhysicalDeviceProperties; limits unavailable");
+        return;
+    }
+    p1(physDev, &props);
+    lim_.physDev = physDev;
+    lim_.maxPerStageSamplers = props.limits.maxPerStageDescriptorSamplers;
+    lim_.maxPerStageSampledImages = props.limits.maxPerStageDescriptorSampledImages;
+    lim_.maxPerStageStorageBuffers = props.limits.maxPerStageDescriptorStorageBuffers;
+    lim_.maxPerStageUniformBuffers = props.limits.maxPerStageDescriptorUniformBuffers;
+    lim_.maxPerStageResources = props.limits.maxPerStageResources;
+    lim_.maxDescriptorSetSamplers = props.limits.maxDescriptorSetSamplers;
+    lim_.maxDescriptorSetSampledImages = props.limits.maxDescriptorSetSampledImages;
+
+    LOGI("A1: DRIVER DESCRIPTOR LIMITS  perStageSamplers=%u perStageSampledImages=%u "
+         "perStageUniformBuffers=%u perStageStorageBuffers=%u perStageResources=%u | "
+         "perSetSamplers=%u perSetSampledImages=%u",
+         lim_.maxPerStageSamplers, lim_.maxPerStageSampledImages,
+         lim_.maxPerStageUniformBuffers, lim_.maxPerStageStorageBuffers,
+         lim_.maxPerStageResources, lim_.maxDescriptorSetSamplers,
+         lim_.maxDescriptorSetSampledImages);
+}
+
+static const char* TypeName(uint32_t t) {
+    switch (t) {
+        case 0: return "SAMPLER";
+        case 1: return "COMBINED_IMAGE_SAMPLER";
+        case 2: return "SAMPLED_IMAGE";
+        case 3: return "STORAGE_IMAGE";
+        case 6: return "UNIFORM_BUFFER";
+        case 7: return "STORAGE_BUFFER";
+        case 8: return "UNIFORM_BUFFER_DYNAMIC";
+        default: return "OTHER";
+    }
+}
+
+// Report each binding that exceeds its per-stage limit, with the chunk count an
+// Option A splitter would need. Deliberately does not modify anything: this run
+// only establishes whether chunking is even arithmetically feasible.
+static void ReportOverflow(const VkDescriptorSetLayoutCreateInfo* ci) {
+    if (!ci) return;
+    for (uint32_t i = 0; i < ci->bindingCount; ++i) {
+        const auto& b = ci->pBindings[i];
+        uint32_t limit = 0;
+        switch (b.descriptorType) {
+            case 0: limit = lim_.maxPerStageSamplers; break;
+            case 2: limit = lim_.maxPerStageSampledImages; break;
+            default: continue;
+        }
+        if (b.descriptorCount <= limit) continue;
+        const uint32_t chunks = (b.descriptorCount + limit - 1) / limit;
+        LOGW("A1: BINDING OVERFLOW binding=%u type=%s count=%u > perStageLimit=%u "
+             "=> needs %u chunk(s) of %u (Option A splitter must rewrite SPIR-V "
+             "indexing and expand %u bind ranges)",
+             (unsigned)b.binding, TypeName(b.descriptorType), (unsigned)b.descriptorCount,
+             limit, chunks, limit, chunks);
+    }
+}
+} // namespace malicompat_a1
+
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
     VkPhysicalDevice physicalDevice,
     const VkDeviceCreateInfo* pCreateInfo,
@@ -1290,6 +1389,11 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
     // clear any requested bit it does not, reporting each one. A bit we spoofed in
     // order to satisfy a guest capability gate must never reach the driver as a
     // hard requirement.
+    // A1: capture the physical device. This is the only entry point that receives one;
+    // descriptor set layout calls only get a VkDevice but need the physical limits.
+    malicompat_a1::g_a1_phys_dev = physicalDevice;
+    malicompat_a1::DumpLimitsOnce(physicalDevice);
+
     if (modifiedCreateInfo.pEnabledFeatures && physicalDevice) {
         // pEnabledFeatures is const, so sanitise a local copy and point the
         // create-info at it. Declared here so it outlives the vendor call below.
@@ -1656,12 +1760,8 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDescriptorSe
     const VkAllocationCallbacks* pAllocator,
     VkDescriptorSetLayout* pSetLayout) {
     InitRealVulkan();
-    // M23: descriptor-set-layout tracer. The guest's four-set packing is only
-    // correct if the layout matches what its (already remapped) shaders declare:
-    // set 0 = 2D heap, set 1 = 3D heap + cube heap at binding 1, set 2 = samplers,
-    // set 3 = UBOs. Any divergence surfaces only as VK_ERROR_INITIALIZATION_FAILED
-    // from vkCreateGraphicsPipelines, so dump every binding plus any
-    // descriptor-indexing flags carried in pNext.
+    malicompat_a1::DumpLimitsOnce(malicompat_a1::g_a1_phys_dev);
+    malicompat_a1::ReportOverflow(pCreateInfo);
     if (pCreateInfo) {
         LOGI("dsl: setLayout bindingCount=%u flags=0x%x",
              (unsigned)pCreateInfo->bindingCount, (unsigned)pCreateInfo->flags);
