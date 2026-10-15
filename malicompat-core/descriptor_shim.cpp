@@ -254,9 +254,25 @@ void VulkanDescriptorShim::CleanupDeviceResources(VkDevice device) {
 // entries wide. Turning the clamps off is the null hypothesis: if cause 53
 // returns and the deadlock goes away, our clamp caused it.
 static bool ClampsEnabled() {
+    // A7: a marker FILE, not an environment variable. An earlier attempt exported
+    // MALICOMPAT_NO_CLAMP from the launching shell, but "am start" does not
+    // propagate the shell environment into the app, so the A/B silently ran with the
+    // clamps still on and proved nothing. A file in the app's own data directory is
+    // reliably visible to us because we execute inside the app's process.
     static const bool on = [] {
+        const char* kMarker = "/data/user/0/io.github.nfsmwrecomp/files/noclamp";
+        FILE* f = fopen(kMarker, "r");
+        if (f) {
+            fclose(f);
+            LOGW("A7: descriptor clamps DISABLED by %s", kMarker);
+            return false;
+        }
         const char* v = getenv("MALICOMPAT_NO_CLAMP");
-        return !(v && v[0] == '1');
+        if (v && v[0] == '1') {
+            LOGW("A7: descriptor clamps DISABLED by MALICOMPAT_NO_CLAMP");
+            return false;
+        }
+        return true;
     }();
     return on;
 }
