@@ -97,6 +97,12 @@ bool SpirvRemapper::DowngradeToSpirv13(const uint32_t* pCode, size_t wordCount, 
     return true;
 }
 
+// M22: INTENTIONALLY NOT CALLED. The guest renderer already performs this exact
+// descriptor-set packing itself (nfsmw_spirv_desificadores.h::JuntarConjuntos, from
+// CrearModulo when maxBoundDescriptorSets < 5). Calling both collapsed distinct
+// descriptor sets onto each other and broke every geometry pipeline. Kept only as
+// documentation of the rule; do not re-enable without first proving the guest did
+// not run, which is not something this layer can observe.
 bool SpirvRemapper::RemapToFourSets(const uint32_t* pCode, size_t wordCount, std::vector<uint32_t>& outCode) {
     if (!IsSpirv(pCode, wordCount)) return false;
 
@@ -152,8 +158,38 @@ bool SpirvRemapper::RemapToFourSets(const uint32_t* pCode, size_t wordCount, std
 bool SpirvRemapper::RemapShader(const uint32_t* pCode, size_t wordCount, std::vector<uint32_t>& outCode) {
     if (!IsSpirv(pCode, wordCount)) return false;
 
+    // M22: the guest renderer ALREADY does the four-descriptor-set packing itself.
+    //
+    // nfsmw's app/src/nfsmw_spirv_desitorios.h implements JuntarConjuntos, called
+    // from CrearModulo when maxBoundDescriptorSets < 5 (Mali Valhall, which includes
+    // our G71, reports 4). Its rule is character-for-character the same as the
+    // RemapToFourSets() that used to live here:
+    //
+    //     OpDecorate DescriptorSet(34) with value >= 2   -> value - 1
+    //     OpDecorate Binding(33) on a resource in set 2  -> value + 1
+    //
+    // Running both therefore remapped twice:
+    //
+    //     guest   2->1  3->2  4->3      => {0,1,2,3}
+    //     layer   2->1  3->2            => {0,1,1,2}   <- sets 1 and 2 collide
+    //
+    // Distinct descriptor sets collapsed onto each other with overlapping bindings,
+    // which is why every geometry pipeline came back VK_ERROR_INITIALIZATION_FAILED
+    // and the guest reported dibujados=0 rechazados=13.
+    //
+    // Proof from the M20 run, same second, in order:
+    //   22:15:03.777 [compatibilidad] 4 conjuntos de descriptores: el monton de
+    //                      cubos va en el conjunto del 3D y samplers y UBO bajan uno
+    //   22:17:18.634 MaliCompat-SPIRV: successfully remapped shader (3417 -> 3417)
+    //
+    // The guest owns the layout it built, so it is authoritative. Drop our copy.
+    // What is left is the SPIR-V version clamp, which is idempotent: it only fires
+    // above 1.3, and the guest has already logged "SPIR-V de la biblioteca
+    // convertido a 1.3", so in practice this is a no-op safety net rather than a
+    // second transformation.
     std::vector<uint32_t> tempCode;
     if (GetSpirvVersion(pCode, wordCount) > kSpirvVersion13) {
+        LOGI("SpirvRemapper: shader is SPIR-V > 1.3; downgrading to 1.3");
         if (!DowngradeToSpirv13(pCode, wordCount, tempCode)) {
             LOGW("SpirvRemapper: Failed to downgrade SPIR-V version, proceeding with original");
             tempCode.assign(pCode, pCode + wordCount);
@@ -162,7 +198,35 @@ bool SpirvRemapper::RemapShader(const uint32_t* pCode, size_t wordCount, std::ve
         tempCode.assign(pCode, pCode + wordCount);
     }
 
-    return RemapToFourSets(tempCode.data(), tempCode.size(), outCode);
+    // Pass the guest's own module through untouched. Still log the descriptor set
+    // inventory so we can see, from the host side, exactly which sets the guest
+    // produced instead of having to infer it from the game's own log. Shader
+    // creation is rare, so this is not worth gating behind a debug level.
+    {
+        std::unordered_map<uint32_t, uint32_t> seen;
+        const uint32_t bound = tempCode[3];
+        for (size_t i = 5; i < tempCode.size();) {
+            const uint32_t len = tempCode[i] >> 16;
+            const uint32_t op = tempCode[i] & 0xFFFF;
+            if (len == 0 || i + len > tempCode.size()) break;
+            if (op == kOpDecorate && len == 4 && tempCode[i + 2] == kDecorationDescriptorSet &&
+                tempCode[i + 1] < bound) {
+                seen[tempCode[i + 1]] = tempCode[i + 3];
+            }
+            i += len;
+        }
+        char sets[64];
+        int off = 0;
+        for (const auto& kv : seen) {
+            off += snprintf(sets + off, sizeof(sets) - off, "%s%u", off ? "," : "", kv.second);
+            if (off >= (int)sizeof(sets) - 4) break;
+        }
+        LOGI("SpirvRemapper: passthrough (M22, no set remap); descriptor sets present: %s",
+             off ? sets : "<none>");
+    }
+
+    outCode.swap(tempCode);
+    return true;
 }
 
 VkResult SpirvRemapper::InterceptCreateShaderModule(
