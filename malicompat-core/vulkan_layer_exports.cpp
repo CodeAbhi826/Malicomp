@@ -1187,7 +1187,15 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkDestroyDevice(
     malicompat::VulkanDescriptorShim::Instance().CleanupDeviceResources(device);
 
     PFN_vkDestroyDevice realDestroy = nullptr;
-    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+    // M20: vkDestroyDevice is a device command, so a NULL-instance
+    // vkGetInstanceProcAddr cannot see it. Resolve in the vendor device dispatch
+    // domain first, same as every other device command (M16/M20). Low severity --
+    // only affects teardown, since a missed resolve just leaks the device on exit.
+    if (device) {
+        realDestroy = reinterpret_cast<PFN_vkDestroyDevice>(
+            malicompat_resolve_vendor_device_proc(device, "vkDestroyDevice"));
+    }
+    if (!realDestroy && g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realDestroy = reinterpret_cast<PFN_vkDestroyDevice>(
             g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkDestroyDevice"));
     }
