@@ -431,6 +431,7 @@ VkResult VulkanDescriptorShim::InterceptAllocateDescriptorSets(
 // we want.
 namespace {
 struct HeapDensity {
+    uint32_t batched = 0;
     bool reporting = false;
     uint32_t writes = 0;
     uint32_t maxIndex = 0;
@@ -462,6 +463,22 @@ void VulkanDescriptorShim::InterceptUpdateDescriptorSets(
         std::lock_guard<std::mutex> lock(mutex_);
         for (uint32_t i = 0; i < descriptorWriteCount; ++i) {
             const auto& write = pDescriptorWrites[i];
+
+            // A3: descriptor write shape. Batch size and index distribution decide
+            // whether Option A can be a clamp+mask or needs dense remapping.
+            {
+                const uint32_t end = write.dstArrayElement + write.descriptorCount;
+                static uint32_t s_calls = 0, s_writes = 0;
+                s_writes++;
+                if (end > g_density.maxIndex) g_density.maxIndex = end;
+                if (write.descriptorCount > 1) g_density.batched++;
+                if (++s_calls >= 200) {
+                    LOGI("A3: WRITES calls=%u totalWrites=%u batchedWrites=%u "
+                         "maxLogicalIndex=%u liveTextures~26",
+                         s_calls, s_writes, g_density.batched, g_density.maxIndex);
+                    s_calls = 0; s_writes = 0;
+                }
+            }
 
             // A2: density probe. Track the highest logical index the guest ever
             // writes per binding, so we can tell a dense allocator (max ~ live
