@@ -603,6 +603,19 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
         // rejects vkCreateDevice (routed straight to it, bypassing our
         // sanitizer). Gate tolerance for the one hard requirement left
         // (vertexPipelineStoresAndAtomics) is handled separately.
+        //
+        // M18: independentBlend gate. rex::ui::vulkan::VulkanDevice::CreateIfSupported
+        // caches this into +0x1CA of the VulkanDevice capability struct; the guest's
+        // DibujosVulkan::Inicializar (nfsmw_nativo_dibujos.cpp:2196) reads it first and
+        // logs "[nativo] C6: el dispositivo Vulkan no tiene independentBlend: no se dibuja",
+        // then returns false -- which leaves the whole guest draw path inert
+        // (C6 dibujados=0 pipelines=0 while C2 output pass runs at 60fps).
+        // independentBlend is a member of the CORE VkPhysicalDeviceFeatures struct, so it
+        // can never be delivered through a Features2 pNext chain; Mali-G71 (Bifrost) does
+        // not implement it. The guest uses it purely as a go/no-go capability gate.
+        const VkBool32 wasIB = pFeatures->independentBlend;
+        pFeatures->independentBlend = VK_TRUE;
+        LOGI("M18: independentBlend %d -> VK_TRUE (DibujosVulkan::Inicializar gate)", (int)wasIB);
         // M7b: log the full gate-relevant set + whether vendor resolution worked.
         LOGI("vkGetPhysicalDeviceFeatures via=%s independentBlend=%d fragmentStoresAndAtomics=%d vertexPipelineStoresAndAtomics=%d geometryShader=%d fillModeNonSolid=%d samplerAnisotropy=%d",
              realPfn ? "vendor" : "NONE(ZEROS?)",
@@ -649,6 +662,16 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
     // M4: pass through real values (see vkGetPhysicalDeviceFeatures note).
     LOGI("vkGetPhysicalDeviceFeatures2 passthrough (vertexPipelineStoresAndAtomics=%d fillModeNonSolid=%d)",
          (int)pFeatures->features.vertexPipelineStoresAndAtomics, (int)pFeatures->features.fillModeNonSolid);
+
+    // M18: same independentBlend gate as the vk1 path. This one is the CORE
+    // VkPhysicalDeviceFeatures inside VkPhysicalDeviceFeatures2 -- it is NOT in any
+    // pNext chain, so the descriptor-indexing spoof below cannot cover it. The guest
+    // reads it via rex::ui::vulkan::VulkanDevice::CreateIfSupported -> +0x1CA.
+    {
+        const VkBool32 wasIB2 = pFeatures->features.independentBlend;
+        pFeatures->features.independentBlend = VK_TRUE;
+        LOGI("M18: Features2 independentBlend %d -> VK_TRUE", (int)wasIB2);
+    }
 
     // Intercept pNext chain to expose emulated descriptor indexing features (F2)
     uint32_t depth = 0;
