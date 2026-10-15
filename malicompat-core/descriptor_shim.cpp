@@ -252,6 +252,17 @@ VkResult VulkanDescriptorShim::InterceptCreateDescriptorPool(
     if (!pCreateInfo || !realFunc) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkDescriptorPoolCreateInfo sanitizedInfo = *pCreateInfo;
+    // A5: pool sizes are sized by the guest from the ORIGINAL (unclamped) binding
+    // counts, i.e. 4096 sampled images and 512 samplers per set. A4 shrank the
+    // layouts to 256 and 128, so log what the pool thinks it is providing.
+    LOGI("A5: createPool flags=0x%x maxSets=%u poolSizeCount=%u",
+         (unsigned)sanitizedInfo.flags, (unsigned)sanitizedInfo.maxSets,
+         (unsigned)sanitizedInfo.poolSizeCount);
+    for (uint32_t i = 0; i < sanitizedInfo.poolSizeCount && i < 8; ++i) {
+        LOGI("A5:   poolSize[%u] type=%d count=%u", i,
+             (int)sanitizedInfo.pPoolSizes[i].type,
+             (unsigned)sanitizedInfo.pPoolSizes[i].descriptorCount);
+    }
     // Strip UPDATE_AFTER_BIND flag from descriptor pool to prevent Mali HAL rejection
     sanitizedInfo.flags &= ~VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
 
@@ -606,6 +617,11 @@ void VulkanDescriptorShim::InterceptCmdBindDescriptorSets(
     uint32_t dynamicOffsetCount,
     const uint32_t* pDynamicOffsets,
     PFN_vkCmdBindDescriptorSets realFunc) {
+    // A5: bind-path tracer. The SIGSEGV moved from pipeline creation (fixed by A4)
+    // to somewhere after the descriptor layouts are clamped, so bracket the three
+    // remaining descriptor entry points to find which one faults.
+    LOGI("A5: cmdBindDescriptorSets firstSet=%u setCount=%u dynOffsets=%u",
+         (unsigned)firstSet, (unsigned)descriptorSetCount, (unsigned)dynamicOffsetCount);
 
     if (!realFunc) return;
 
