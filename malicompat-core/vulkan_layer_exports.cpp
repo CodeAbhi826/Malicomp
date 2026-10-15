@@ -2085,7 +2085,15 @@ MALICOMPAT_EXPORT __attribute__((weak)) VKAPI_ATTR VkResult VKAPI_CALL malicompa
 
     InitRealVulkan();
     PFN_vkCreateShaderModule realCreate = nullptr;
-    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+    // M20: device command; NULL-instance GIPA cannot see it. The strong override in
+    // spirv_remapper.cpp is what GetDeviceProcAddr actually hands out, so this weak
+    // copy is normally dead code, but it carried the same 0x501234 mock handle that
+    // M15 was created to remove. Fix the lookup and drop the mock.
+    if (device) {
+        realCreate = reinterpret_cast<PFN_vkCreateShaderModule>(
+            malicompat_resolve_vendor_device_proc(device, "vkCreateShaderModule"));
+    }
+    if (!realCreate && g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realCreate = reinterpret_cast<PFN_vkCreateShaderModule>(
             g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateShaderModule"));
     }
@@ -2096,8 +2104,10 @@ MALICOMPAT_EXPORT __attribute__((weak)) VKAPI_ATTR VkResult VKAPI_CALL malicompa
     if (realCreate) {
         return realCreate(device, pCreateInfo, pAllocator, pShaderModule);
     }
-    *pShaderModule = reinterpret_cast<VkShaderModule>(0x501234);
-    return VK_SUCCESS;
+    // M20: never mint a fake handle. The driver dereferences VkShaderModule, and a
+    // synthetic pointer kills it inside vkCreateGraphicsPipelines.
+    LOGE("malicompat_vkCreateShaderModule: vendor proc unresolvable, failing loud");
+    return VK_ERROR_INITIALIZATION_FAILED;
 }
 
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreatePipelineLayout(
@@ -2146,7 +2156,34 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreatePipelineCach
     VkPipelineCache* pPipelineCache) {
     InitRealVulkan();
     PFN_vkCreatePipelineCache realFunc = nullptr;
-    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+    // M20: vkCreatePipelineCache is a DEVICE command. vkGetInstanceProcAddr with a
+    // NULL instance only resolves *global* commands and returns NULL for device
+    // ones, so the old lookup below could never succeed and this function fell
+    // through to the mock handle 0x301234 on every single call.
+    //
+    // That mock is what killed the first guest draw. nfsmw's DibujosVulkan creates
+    // a pipeline cache (C6 "cache de pipelines activa"), got 0x301234 back, and then
+    // passed it as VkGraphicsPipelineCreateInfo::pipelineCache. The Mali driver
+    // dereferenced the bogus handle and the process died with SIGSEGV inside
+    // vkCreateGraphicsPipelines. Evidence from the run:
+    //
+    //   22:06:41.738 W malicompat_vkCreatePipelineCache: vendor HAL unresolvable,
+    //                     returning mock cache
+    //   22:06:41.720 I pipe#6 gfx[0]: ... cache=0x0      -> vendor returned 0   (OK)
+    //   22:06:42.677 I pipe#7 gfx[0]: ... cache=0x301234 -> vendor returned ?  (SIGSEGV)
+    //   22:06:42.951 Zygote: Process 4200 exited due to signal 11
+    //
+    // Every pipeline that passed cache=0x0 succeeded; the only pipeline that got
+    // the mock handle crashed the process. M15 removed the equivalent mock for
+    // shader modules (0x501234) but missed this one.
+    //
+    // Resolve through the vendor device dispatch table first, which is the only
+    // domain where a device command is visible.
+    if (device) {
+        realFunc = reinterpret_cast<PFN_vkCreatePipelineCache>(
+            malicompat_resolve_vendor_device_proc(device, "vkCreatePipelineCache"));
+    }
+    if (!realFunc && g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realFunc = reinterpret_cast<PFN_vkCreatePipelineCache>(
             g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkCreatePipelineCache"));
     }
@@ -2159,9 +2196,15 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreatePipelineCach
     if (realFunc) {
         return realFunc(device, pCreateInfo, pAllocator, pPipelineCache);
     }
-    LOGW("malicompat_vkCreatePipelineCache: vendor HAL unresolvable, returning mock cache");
+    // M20: a null pipeline cache is a legal request and means "no cache". Returning
+    // VK_NULL_HANDLE keeps every downstream vkDestroyPipelineCache /
+    // vkGetPipelineCacheData call well defined, and is exactly the shape the seven
+    // pipelines that already succeeded were using (cache=0x0). Never mint a fake
+    // handle again: the driver is handed the pointer and dereferences it.
+    LOGW("malicompat_vkCreatePipelineCache: vendor HAL unresolvable, returning "
+         "VK_NULL_HANDLE (legal no-cache) instead of a mock handle");
     if (pPipelineCache) {
-        *pPipelineCache = reinterpret_cast<VkPipelineCache>(0x301234);
+        *pPipelineCache = VK_NULL_HANDLE;
     }
     return VK_SUCCESS;
 }
@@ -2172,7 +2215,13 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkDestroyPipelineCache(
     const VkAllocationCallbacks* pAllocator) {
     InitRealVulkan();
     PFN_vkDestroyPipelineCache realFunc = nullptr;
-    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+    // M20: device command, so it is only visible through the vendor's device
+    // dispatch table. A NULL-instance vkGetInstanceProcAddr never resolves it.
+    if (device) {
+        realFunc = reinterpret_cast<PFN_vkDestroyPipelineCache>(
+            malicompat_resolve_vendor_device_proc(device, "vkDestroyPipelineCache"));
+    }
+    if (!realFunc && g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realFunc = reinterpret_cast<PFN_vkDestroyPipelineCache>(
             g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkDestroyPipelineCache"));
     }
@@ -2194,7 +2243,15 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkGetPipelineCacheDa
     void* pData) {
     InitRealVulkan();
     PFN_vkGetPipelineCacheData realFunc = nullptr;
-    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+    // M20: device command; NULL-instance GIPA cannot see it. This one matters now
+    // that vkCreatePipelineCache hands back a real vendor handle: the guest
+    // serialises the C6 pipeline cache to nfsmw_nativo_pipelines.bin through this
+    // call, and silently returning size 0 would break that persistence.
+    if (device) {
+        realFunc = reinterpret_cast<PFN_vkGetPipelineCacheData>(
+            malicompat_resolve_vendor_device_proc(device, "vkGetPipelineCacheData"));
+    }
+    if (!realFunc && g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realFunc = reinterpret_cast<PFN_vkGetPipelineCacheData>(
             g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkGetPipelineCacheData"));
     }
@@ -2220,7 +2277,12 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkMergePipelineCache
     const VkPipelineCache* pSrcCaches) {
     InitRealVulkan();
     PFN_vkMergePipelineCaches realFunc = nullptr;
-    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+    // M20: device command; NULL-instance GIPA cannot see it.
+    if (device) {
+        realFunc = reinterpret_cast<PFN_vkMergePipelineCaches>(
+            malicompat_resolve_vendor_device_proc(device, "vkMergePipelineCaches"));
+    }
+    if (!realFunc && g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
         realFunc = reinterpret_cast<PFN_vkMergePipelineCaches>(
             g_vendor_device->GetInstanceProcAddr(VK_NULL_HANDLE, "vkMergePipelineCaches"));
     }
