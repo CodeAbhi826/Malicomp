@@ -659,6 +659,66 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
     }
     if (!pFeatures) return;
 
+    // M24: record what the driver ACTUALLY reports before we spoof anything.
+    // This is the decisive measurement for the "is descriptor indexing really
+    // absent, or are we stripping a feature the driver has?" question.
+    //
+    // The layer currently claims descriptor indexing it does not implement:
+    // it appends VK_EXT_descriptor_indexing to the enabled list, forces all six
+    // of the guest's required features to VK_TRUE, and then STRIPS
+    // VkPhysicalDeviceVulkan12Features (sType 51) back out of vkCreateDevice's
+    // pNext so the driver is never told it has them. Meanwhile the guest asks for
+    // a 4096-entry SAMPLED_IMAGE heap and a 512-entry SAMPLER heap, against a
+    // driver whose real limits are 256 and 128, and every geometry pipeline comes
+    // back VK_ERROR_INITIALIZATION_FAILED (cause 53).
+    //
+    // If the vendor reports descriptorIndexing = VK_TRUE here, we are throwing
+    // away a capability we already have and the fix is to stop stripping it.
+    // If it reports VK_FALSE, the driver genuinely lacks it and emulated bindless
+    // virtualization is the only remaining route.
+    {
+        const auto* node = reinterpret_cast<const VkBaseOutStructure*>(pFeatures->pNext);
+        uint32_t depth = 0;
+        while (node && depth < 16) {
+            const int st = (int)node->sType;
+            if (st == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES) {
+                const auto* v12 = reinterpret_cast<const VkPhysicalDeviceVulkan12Features*>(node);
+                LOGI("M24: VENDOR RAW VkPhysicalDeviceVulkan12Features: descriptorIndexing=%d "
+                     "runtimeDescriptorArray=%d shaderSampledImageArrayNonUniformIndexing=%d "
+                     "descriptorBindingPartiallyBound=%d "
+                     "descriptorBindingSampledImageUpdateAfterBind=%d "
+                     "descriptorBindingUpdateUnusedWhilePending=%d bufferDeviceAddress=%d "
+                     "scalarBlockLayout=%d uniformBufferStandardLayout=%d",
+                     (int)v12->descriptorIndexing, (int)v12->runtimeDescriptorArray,
+                     (int)v12->shaderSampledImageArrayNonUniformIndexing,
+                     (int)v12->descriptorBindingPartiallyBound,
+                     (int)v12->descriptorBindingSampledImageUpdateAfterBind,
+                     (int)v12->descriptorBindingUpdateUnusedWhilePending,
+                     (int)v12->bufferDeviceAddress, (int)v12->scalarBlockLayout,
+                     (int)v12->uniformBufferStandardLayout);
+            } else if (st == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES) {
+                const auto* di =
+                    reinterpret_cast<const VkPhysicalDeviceDescriptorIndexingFeatures*>(node);
+                LOGI("M24: VENDOR RAW VkPhysicalDeviceDescriptorIndexingFeatures: "
+                     "shaderInputAttachmentArrayDynamicIndexing=%d runtimeDescriptorArray=%d "
+                     "descriptorBindingPartiallyBound=%d "
+                     "descriptorBindingSampledImageUpdateAfterBind=%d "
+                     "descriptorBindingUpdateUnusedWhilePending=%d",
+                     (int)di->shaderInputAttachmentArrayDynamicIndexing,
+                     (int)di->runtimeDescriptorArray, (int)di->descriptorBindingPartiallyBound,
+                     (int)di->descriptorBindingSampledImageUpdateAfterBind,
+                     (int)di->descriptorBindingUpdateUnusedWhilePending);
+            }
+            node = reinterpret_cast<const VkBaseOutStructure*>(node->pNext);
+            ++depth;
+        }
+        if (depth == 0) {
+            LOGI("M24: vendor returned NO pNext structs from vkGetPhysicalDeviceFeatures2 "
+                 "(descriptor indexing is a 1.2 core feature, so its absence means "
+                 "the driver does not have it)");
+        }
+    }
+
     // M4: pass through real values (see vkGetPhysicalDeviceFeatures note).
     LOGI("vkGetPhysicalDeviceFeatures2 passthrough (vertexPipelineStoresAndAtomics=%d fillModeNonSolid=%d)",
          (int)pFeatures->features.vertexPipelineStoresAndAtomics, (int)pFeatures->features.fillModeNonSolid);
@@ -996,6 +1056,31 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkEnumerateDeviceExt
     return res;
 }
 
+// M24: VkPhysicalDeviceFeatures member names, in declaration order, so the
+// pEnabledFeatures sanitiser can report exactly which bit it cleared. The struct
+// is 55 VkBool32 fields, so word*32+bit indexes this table directly.
+static const char* const kCoreFeatureNames[55] = {
+    "robustBufferAccess", "fullDrawIndexUint32", "imageCubeArray", "independentBlend",
+    "geometryShader", "tessellationShader", "sampleRateShading", "dualSrcBlend",
+    "logicOp", "multiDrawIndirect", "drawIndirectFirstInstance", "depthClamp",
+    "depthBiasClamp", "fillModeNonSolid", "depthBounds", "wideLines",
+    "largePoints", "alphaToOne", "multiViewport", "samplerAnisotropy",
+    "textureCompressionETC2", "textureCompressionASTC_LDR", "textureCompressionBC",
+    "occlusionQueryPrecise", "pipelineStatisticsQuery",
+    "vertexPipelineStoresAndAtomics", "fragmentStoresAndAtomics",
+    "shaderTessellationAndGeometryPointSize", "shaderImageGatherExtended",
+    "shaderStorageImageExtendedFormats", "shaderStorageImageMultisample",
+    "shaderStorageImageReadWithoutFormat", "shaderStorageImageWriteWithoutFormat",
+    "shaderUniformBufferArrayDynamicIndexing", "shaderSampledImageArrayDynamicIndexing",
+    "shaderStorageBufferArrayDynamicIndexing", "shaderStorageImageArrayDynamicIndexing",
+    "shaderClipDistance", "shaderCullDistance", "shaderFloat64",
+    "shaderInt64", "shaderInt16", "shaderResourceResidency", "shaderResourceMinLod",
+    "sparseBinding", "sparseResidencyBuffer", "sparseResidencyImage2D",
+    "sparseResidencyImage3D", "sparseResidency2Samples", "sparseResidency4Samples",
+    "sparseResidency8Samples", "sparseResidency16Samples", "sparseResidencyAliased",
+    "variablePointersStorageBuffer", "variablePointers",
+};
+
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
     VkPhysicalDevice physicalDevice,
     const VkDeviceCreateInfo* pCreateInfo,
@@ -1161,6 +1246,71 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
     if (!realCreate) {
         LOGE("Failed to resolve real vkCreateDevice");
         return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    // M24: sanitise pEnabledFeatures against what the driver really supports.
+    //
+    // With with_gpu_emulation = true, librexruntime copies supported_features
+    // wholesale into enabled_features (XE_UI_VULKAN_FEATURE does
+    // `enabled_features.name = supported_features.name`), so anything the layer
+    // spoofs in vkGetPhysicalDeviceFeatures comes straight back as a *request* at
+    // vkCreateDevice. The driver answers VK_ERROR_FEATURE_NOT_PRESENT for a bit it
+    // does not have, and the device fails to be created at all.
+    //
+    // This is the same reason M4 deliberately passes vertexPipelineStoresAndAtomics
+    // through. Rather than leaving that to guesswork, ask the vendor what it has and
+    // clear any requested bit it does not, reporting each one. A bit we spoofed in
+    // order to satisfy a guest capability gate must never reach the driver as a
+    // hard requirement.
+    if (modifiedCreateInfo.pEnabledFeatures && physicalDevice) {
+        // pEnabledFeatures is const, so sanitise a local copy and point the
+        // create-info at it. Declared here so it outlives the vendor call below.
+        VkPhysicalDeviceFeatures sanitizedFeatures = *modifiedCreateInfo.pEnabledFeatures;
+        modifiedCreateInfo.pEnabledFeatures = &sanitizedFeatures;
+
+        VkPhysicalDeviceFeatures realVendorFeatures = {};
+        PFN_vkGetPhysicalDeviceFeatures realQuery = nullptr;
+        if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+            realQuery = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(
+                malicompat_vendor_proc("vkGetPhysicalDeviceFeatures"));
+        }
+        if (!realQuery) {
+            realQuery = g_vendor_vkGetPhysicalDeviceFeatures;
+        }
+        if (realQuery) {
+            realQuery(physicalDevice, &realVendorFeatures);
+        }
+        if (realQuery) {
+            const uint32_t* req = reinterpret_cast<const uint32_t*>(&sanitizedFeatures);
+            const uint32_t* have = reinterpret_cast<const uint32_t*>(&realVendorFeatures);
+            const uint32_t nWords = sizeof(VkPhysicalDeviceFeatures) / sizeof(uint32_t);
+            char names[512];
+            int nOff = 0;
+            for (uint32_t w = 0; w < nWords; ++w) {
+                uint32_t cleared = req[w] & ~have[w];
+                if (!cleared) continue;
+                for (uint32_t bit = 0; bit < 32 && cleared; ++bit, cleared >>= 1) {
+                    if (!(cleared & 1u)) continue;
+                    const uint32_t idx = w * 32 + bit;
+                    nOff += snprintf(names + nOff, sizeof(names) - nOff, "%s%s",
+                                     nOff ? "," : "", kCoreFeatureNames[idx] ? kCoreFeatureNames[idx] : "?");
+                    if (nOff >= (int)sizeof(names) - 4) break;
+                }
+                if (nOff >= (int)sizeof(names) - 4) break;
+            }
+            if (nOff) {
+                // Reassemble defensively: clear the whole unsupported word set.
+                for (uint32_t w = 0; w < nWords; ++w) {
+                    reinterpret_cast<uint32_t*>(&sanitizedFeatures)[w] &= have[w];
+                }
+                LOGW("M24: cleared unsupported pEnabledFeatures bits before vkCreateDevice: %s",
+                     names);
+            } else {
+                LOGI("M24: every requested pEnabledFeatures bit is supported by the driver");
+            }
+        } else {
+            LOGW("M24: could not query vendor features; leaving pEnabledFeatures untouched");
+        }
     }
 
     VkResult res = realCreate(physicalDevice, &modifiedCreateInfo, pAllocator, pDevice);
