@@ -2,6 +2,7 @@
 #include "vulkan_layer_exports.h"
 #include <vector>
 #include <cstring>
+#include <cstdlib>
 #include <dlfcn.h>
 
 namespace {
@@ -242,6 +243,24 @@ void VulkanDescriptorShim::CleanupDeviceResources(VkDevice device) {
     LOGI("Cleaned up dummy fallback resources for device=%p", device);
 }
 
+// A7: build-time switches for the A4/A6 clamps, so we can A/B them without a
+// rebuild each time. Default is ON, i.e. exactly what A4/A6 shipped.
+//
+// Why: cause 53 is fixed with the clamps on (zero occurrences, all pipelines
+// return 0), but the process now deadlocks during renderer init and never
+// reaches "dibujos nativos preparados". We do not yet know whether that
+// deadlock is pre-existing or something our clamp introduced by shrinking the
+// layouts underneath a guest that still believes its heaps are 4096 and 512
+// entries wide. Turning the clamps off is the null hypothesis: if cause 53
+// returns and the deadlock goes away, our clamp caused it.
+static bool ClampsEnabled() {
+    static const bool on = [] {
+        const char* v = getenv("MALICOMPAT_NO_CLAMP");
+        return !(v && v[0] == '1');
+    }();
+    return on;
+}
+
 VkResult VulkanDescriptorShim::InterceptCreateDescriptorPool(
     VkDevice device,
     const VkDescriptorPoolCreateInfo* pCreateInfo,
@@ -281,7 +300,7 @@ VkResult VulkanDescriptorShim::InterceptCreateDescriptorPool(
     // Ordering matters: maxSets is already known here, and the pool is created
     // before the layouts it backs, so this deliberately uses a fixed per-type cap
     // rather than trying to look up layouts that do not exist yet.
-    if (pCreateInfo->poolSizeCount && pCreateInfo->pPoolSizes) {
+    if (ClampsEnabled() && pCreateInfo->poolSizeCount && pCreateInfo->pPoolSizes) {
         std::vector<VkDescriptorPoolSize> sizes(pCreateInfo->pPoolSizes,
                                                 pCreateInfo->pPoolSizes + pCreateInfo->poolSizeCount);
         const uint32_t sets = sanitizedInfo.maxSets ? sanitizedInfo.maxSets : 1;
@@ -388,7 +407,7 @@ VkResult VulkanDescriptorShim::InterceptCreateDescriptorSetLayout(
     // maxPerStageDescriptorSampledImages is a hard guarantee on how many descriptors
     // one shader stage may address, so no amount of splitting avoids it; clamping to
     // it is the only legal shape.
-    if (pCreateInfo->pBindings && pCreateInfo->bindingCount > 0) {
+    if (ClampsEnabled() && pCreateInfo->pBindings && pCreateInfo->bindingCount > 0) {
         std::vector<VkDescriptorSetLayoutBinding> clamped(pCreateInfo->pBindings,
                                                           pCreateInfo->pBindings + pCreateInfo->bindingCount);
         bool changed = false;
