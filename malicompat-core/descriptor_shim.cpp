@@ -413,6 +413,32 @@ VkResult VulkanDescriptorShim::InterceptAllocateDescriptorSets(
     return result;
 }
 
+// A2: descriptor-write density probe.
+//
+// Option A hinges on one question we can answer at runtime. The guest declares a
+// 4096-entry bindless texture heap, but maxPerStageDescriptorSampledImages is 256
+// on this Mali-G71, so a single shader stage can never address more than 256
+// descriptors no matter how the layout is split. That forces a dense physical
+// array plus a logical->physical map.
+//
+// If the guest allocates its heap slots densely (0,1,2,...N), then a plain clamp
+// of descriptorCount 4096 -> 256 plus an SPIR-V index mask of `idx & 255` is the
+// whole fix: no per-draw mapping, no lookup table. If the guest allocates
+// sparsely, we need a dense allocator and an indirection LUT in the shader.
+//
+// So: record which logical indices the guest actually writes, and report the
+// observed maximum and the number of distinct slots. Dense max ~ N is the answer
+// we want.
+namespace {
+struct HeapDensity {
+    bool reporting = false;
+    uint32_t writes = 0;
+    uint32_t maxIndex = 0;
+    uint32_t lastReported = 0;
+};
+HeapDensity g_density;
+} // namespace
+
 void VulkanDescriptorShim::InterceptUpdateDescriptorSets(
     VkDevice device,
     uint32_t descriptorWriteCount,
@@ -436,6 +462,31 @@ void VulkanDescriptorShim::InterceptUpdateDescriptorSets(
         std::lock_guard<std::mutex> lock(mutex_);
         for (uint32_t i = 0; i < descriptorWriteCount; ++i) {
             const auto& write = pDescriptorWrites[i];
+
+            // A2: density probe. Track the highest logical index the guest ever
+            // writes per binding, so we can tell a dense allocator (max ~ live
+            // count) from a sparse one (max in the thousands). That decides whether
+            // Option A is a simple clamp+mask or needs a dense map plus shader
+            // indirection.
+            {
+                const uint32_t end = write.dstArrayElement + write.descriptorCount;
+                if (!g_density.reporting && end > 256) {
+                    g_density.reporting = true;  // only the big bindless heaps matter
+                }
+                if (g_density.reporting && write.descriptorCount == 1) {
+                    ++g_density.writes;
+                    if (write.dstArrayElement > g_density.maxIndex) {
+                        g_density.maxIndex = write.dstArrayElement;
+                    }
+                    if (g_density.writes - g_density.lastReported >= 500) {
+                        g_density.lastReported = g_density.writes;
+                        LOGI("A2: HEAP DENSITY binding=%u writes=%u maxLogicalIndex=%u "
+                             "(live textures ~26; dense allocator => clamp+mask is viable)",
+                             (unsigned)write.dstBinding, g_density.writes, g_density.maxIndex);
+                    }
+                }
+            }
+
             auto it = shadowSets_.find(write.dstSet);
             if (it != shadowSets_.end()) {
                 auto& binding = it->second.bindings[write.dstBinding];
