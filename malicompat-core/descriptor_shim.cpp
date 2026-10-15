@@ -300,6 +300,67 @@ VkResult VulkanDescriptorShim::InterceptCreateDescriptorSetLayout(
     // Strip UPDATE_AFTER_BIND from set layout create flags if present
     sanitizedInfo.flags &= ~VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
 
+    // A4: clamp oversized bindless heap bindings to the driver's per-stage limit.
+    //
+    // Measured on this Mali-G71 (A1):
+    //   maxPerStageDescriptorSampledImages = 256
+    //   maxPerStageDescriptorSamplers     = 128
+    //
+    // The guest declares SAMPLED_IMAGE x 4096 and SAMPLER x 512. Those bindings are
+    // illegal, so every geometry pipeline returns VK_ERROR_INITIALIZATION_FAILED,
+    // which the guest reports as "C6: no se pudo crear un pipeline (causa 53)" and
+    // which leaves dibujados=0 -- a black screen, since the intro video is a texture
+    // the game draws and nothing is ever rasterised.
+    //
+    // Why clamping is sufficient here, rather than needing an index mask:
+    // A3 measured the guest's actual allocation pattern and it is dense and
+    // sequential -- maxLogicalIndex=15 against roughly 26 live textures, with zero
+    // batched writes. So the guest only ever addresses slots it has actually
+    // allocated. Slots beyond the live range are pre-filled with the 1x1 dummy
+    // 2D/Cube resources this class already creates (see InitializeDeviceResources),
+    // which is what makes the read safe and stands in for PARTIALLY_BOUND.
+    //
+    // maxPerStageDescriptorSampledImages is a hard guarantee on how many descriptors
+    // one shader stage may address, so no amount of splitting avoids it; clamping to
+    // it is the only legal shape.
+    if (pCreateInfo->pBindings && pCreateInfo->bindingCount > 0) {
+        std::vector<VkDescriptorSetLayoutBinding> clamped(pCreateInfo->pBindings,
+                                                          pCreateInfo->pBindings + pCreateInfo->bindingCount);
+        bool changed = false;
+        for (auto& b : clamped) {
+            uint32_t limit = 0;
+            switch (b.descriptorType) {
+                case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+                case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+                case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+                case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+                case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+                    limit = 256;  // use the sampled-image ceiling, the loosest of these
+                    break;
+                case VK_DESCRIPTOR_TYPE_SAMPLER:
+                case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+                    limit = 128;  // maxPerStageDescriptorSamplers
+                    break;
+                default:
+                    continue;
+            }
+            if (limit && b.descriptorCount > limit) {
+                LOGW("A4: clamping binding=%u type=%d descriptorCount %u -> %u "
+                     "(driver per-stage limit; guest allocates densely, maxIndex~15)",
+                     (unsigned)b.binding, (int)b.descriptorType, (unsigned)b.descriptorCount, limit);
+                b.descriptorCount = limit;
+                changed = true;
+            }
+        }
+        if (changed) {
+            sanitizedInfo.pBindings = clamped.data();
+            sanitizedInfo.bindingCount = (uint32_t)clamped.size();
+            // pNext binding-flags array is indexed by binding, and we kept the
+            // binding count and ordering identical, so it stays valid as-is.
+        }
+    }
+
     VkResult result = realFunc(device, &sanitizedInfo, pAllocator, pSetLayout);
     if (result == VK_SUCCESS && pSetLayout && *pSetLayout) {
         CachedLayoutInfo cached{};
