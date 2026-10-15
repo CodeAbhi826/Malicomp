@@ -252,19 +252,73 @@ VkResult VulkanDescriptorShim::InterceptCreateDescriptorPool(
     if (!pCreateInfo || !realFunc) return VK_ERROR_INITIALIZATION_FAILED;
 
     VkDescriptorPoolCreateInfo sanitizedInfo = *pCreateInfo;
-    // A5: pool sizes are sized by the guest from the ORIGINAL (unclamped) binding
-    // counts, i.e. 4096 sampled images and 512 samplers per set. A4 shrank the
-    // layouts to 256 and 128, so log what the pool thinks it is providing.
-    LOGI("A5: createPool flags=0x%x maxSets=%u poolSizeCount=%u",
-         (unsigned)sanitizedInfo.flags, (unsigned)sanitizedInfo.maxSets,
-         (unsigned)sanitizedInfo.poolSizeCount);
-    for (uint32_t i = 0; i < sanitizedInfo.poolSizeCount && i < 8; ++i) {
-        LOGI("A5:   poolSize[%u] type=%d count=%u", i,
-             (int)sanitizedInfo.pPoolSizes[i].type,
-             (unsigned)sanitizedInfo.pPoolSizes[i].descriptorCount);
-    }
     // Strip UPDATE_AFTER_BIND flag from descriptor pool to prevent Mali HAL rejection
     sanitizedInfo.flags &= ~VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+
+    // A6: clamp the pool's descriptor counts to what A4 actually left in the
+    // layouts.
+    //
+    // The guest sizes its pools from the ORIGINAL bindless heap capacities:
+    //   A5: createPool flags=0x2 maxSets=4  poolSize[0] type=SAMPLED_IMAGE count=4176
+    //                                             poolSize[1] type=SAMPLER      count=512
+    //
+    // A4 shrank every descriptor set layout to the driver's per-stage limits
+    // (SAMPLED_IMAGE 256, SAMPLER 128). So the pool advertises far more descriptors
+    // than any layout in it can hold. That mismatch is what killed the process with
+    // SIGSEGV immediately after this call, with no further layer output and no
+    // tombstone:
+    //
+    //   00:15:49 A5: createPool flags=0x2 maxSets=4 poolSize[0] type=2 count=4176
+    //   00:15:49 A5:   poolSize[1] type=0 count=512
+    //   00:15:49 Zygote: Process 21537 exited due to signal 11 (Segmentation fault)
+    //
+    // Clamp per-type to maxSetLayoutCount * maxSets, which is the most the layouts
+    // that reference this pool can ever be asked for. The pool is still far larger
+    // than the driver needs (256 * 4 = 1024 sampled images against a 4176 heap),
+    // and the guest only ever populates ~26 densely (A3: maxLogicalIndex=15), so
+    // nothing that is actually used gets dropped.
+    //
+    // Ordering matters: maxSets is already known here, and the pool is created
+    // before the layouts it backs, so this deliberately uses a fixed per-type cap
+    // rather than trying to look up layouts that do not exist yet.
+    if (pCreateInfo->poolSizeCount && pCreateInfo->pPoolSizes) {
+        std::vector<VkDescriptorPoolSize> sizes(pCreateInfo->pPoolSizes,
+                                                pCreateInfo->pPoolSizes + pCreateInfo->poolSizeCount);
+        const uint32_t sets = sanitizedInfo.maxSets ? sanitizedInfo.maxSets : 1;
+        bool changed = false;
+        for (auto& e : sizes) {
+            uint32_t perSet = 0;
+            switch (e.type) {
+                case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+                case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+                case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+                case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+                case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+                    perSet = 256;  // matches the A4 layout clamp
+                    break;
+                case VK_DESCRIPTOR_TYPE_SAMPLER:
+                case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+                    perSet = 128;  // matches the A4 layout clamp
+                    break;
+                default:
+                    continue;
+            }
+            const uint32_t cap = perSet * sets;
+            if (cap && e.descriptorCount > cap) {
+                LOGW("A6: clamping pool descriptorCount type=%d %u -> %u "
+                     "(%u sets x %u per-set layout clamp; layouts no longer hold the "
+                     "original bindless capacity)",
+                     (int)e.type, (unsigned)e.descriptorCount, cap, sets, perSet);
+                e.descriptorCount = cap;
+                changed = true;
+            }
+        }
+        if (changed) {
+            sanitizedInfo.poolSizeCount = (uint32_t)sizes.size();
+            sanitizedInfo.pPoolSizes = sizes.data();
+        }
+    }
 
     return realFunc(device, &sanitizedInfo, pAllocator, pDescriptorPool);
 }
