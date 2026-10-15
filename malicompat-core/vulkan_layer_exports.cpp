@@ -675,6 +675,25 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
 
     // Intercept pNext chain to expose emulated descriptor indexing features (F2)
     uint32_t depth = 0;
+
+    // M19 telemetry: dump exactly which structs the host chains into this query.
+    // This is the single measurement that settles whether the descriptor-indexing
+    // spoof below can ever run -- if the host chains nothing, it cannot.
+    {
+        char chain[512];
+        int off = 0;
+        const auto* n = reinterpret_cast<const VkBaseOutStructure*>(pFeatures->pNext);
+        uint32_t d2 = 0;
+        while (n && d2++ < 32) {
+            off += std::snprintf(chain + off, sizeof(chain) - off, "%s0x%X",
+                                 off ? "," : "", (unsigned)n->sType);
+            if (off >= (int)sizeof(chain) - 8) break;
+            n = reinterpret_cast<const VkBaseOutStructure*>(n->pNext);
+        }
+        LOGI("M19: Features2 pNext chain [%s]  (core.independentBlend=%d)",
+             off ? chain : "<EMPTY>", (int)pFeatures->features.independentBlend);
+    }
+
     auto* next = reinterpret_cast<VkBaseOutStructure*>(pFeatures->pNext);
     while (next && depth++ < 64) {
         if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES) {
@@ -724,9 +743,67 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
             v12->descriptorBindingVariableDescriptorCount = VK_TRUE;
             v12->runtimeDescriptorArray = VK_TRUE;
             LOGI("Intercepted VkPhysicalDeviceVulkan12Features: descriptor indexing flags enabled!");
+        } else if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES) {
+            // M19: the host may chain the 1.1 aggregate instead of the 1.2 one once
+            // it sees apiVersion >= 1.2. Same descriptor-indexing surface.
+            auto* v11 = reinterpret_cast<VkPhysicalDeviceVulkan11Features*>(next);
+            v11->storageBuffer16BitAccess = VK_TRUE;
+            v11->uniformAndStorageBuffer16BitAccess = VK_TRUE;
+            v11->storagePushConstant16 = VK_TRUE;
+            v11->storageInputOutput16 = VK_TRUE;
+            v11->multiview = VK_TRUE;
+            v11->multiviewGeometryShader = VK_TRUE;
+            v11->multiviewTessellationShader = VK_TRUE;
+            v11->variablePointersStorageBuffer = VK_TRUE;
+            v11->variablePointers = VK_TRUE;
+            v11->protectedMemory = VK_FALSE;
+            v11->samplerYcbcrConversion = VK_TRUE;
+            LOGI("M19: intercepted VkPhysicalDeviceVulkan11Features");
+        } else if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES) {
+            LOGI("M19: chained VkPhysicalDeviceVulkan13Features (passthrough)");
         }
         next = next->pNext;
     }
+}
+
+// M19: vk1 physical-device properties interceptor. Previously we only intercepted
+// the Properties2 flavour, so the plain vkGetPhysicalDeviceProperties() went
+// straight to the vendor and the app kept seeing the driver's real apiVersion
+// 1.1.131 (Mali-G71 / Bifrost, r26p0).
+//
+// rex::ui::vulkan::VulkanDevice::CreateIfSupported (librexruntime.so 0x42EADC) builds
+// its vkGetPhysicalDeviceFeatures2 pNext chain behind extension gates read from
+// [instance+0x1A9 / 0x211 / 0x212 / 0x215]. On this run it chained nothing, so
+// VkPhysicalDeviceDescriptorIndexingFeatures was never requested, our Features2
+// pNext spoof never ran, every descriptor-indexing derived capability stayed false,
+// and the guest's DibujosVulkan::Inicializar aborted at its first check:
+//   [error] [nativo] C6: el dispositivo Vulkan no tiene independentBlend: no se dibuja
+// Reporting 1.2.0 gives the runtime the descriptor-indexing core path instead of
+// making it depend on VK_EXT_descriptor_indexing being enabled.
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceProperties(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceProperties* pProperties) {
+    InitRealVulkan();
+    PFN_vkGetPhysicalDeviceProperties realPfn = nullptr;
+    if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
+        realPfn = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(
+            malicompat_vendor_proc("vkGetPhysicalDeviceProperties"));
+    }
+    if (!realPfn && g_vendor_vkGetPhysicalDeviceProperties) {
+        realPfn = g_vendor_vkGetPhysicalDeviceProperties;
+    }
+    if (realPfn) {
+        realPfn(physicalDevice, pProperties);
+    }
+    if (!pProperties) return;
+
+    // M19: lift apiVersion to 1.2.0 so descriptor indexing is core rather than an
+    // extension the host must remember to enable.
+    const uint32_t wasApi = pProperties->apiVersion;
+    pProperties->apiVersion = VK_MAKE_API_VERSION(1, 2, 0);
+    LOGI("M19: vkGetPhysicalDeviceProperties apiVersion %u -> %u (driver %s)",
+         (unsigned)VK_API_VERSION_MAJOR(wasApi), (unsigned)VK_API_VERSION_MAJOR(pProperties->apiVersion),
+         pProperties->deviceName);
 }
 
 MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceProperties2(
@@ -765,6 +842,15 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDevicePrope
     }
 
     // Intercept pNext chain to expose spoofed descriptor indexing limits (F3)
+    // M19: same apiVersion lift as the vk1 entry point.
+    if (pProperties->properties.apiVersion < VK_MAKE_API_VERSION(1, 2, 0)) {
+        LOGI("M19: Properties2 apiVersion %u.%u.%u -> 1.2.0",
+             (unsigned)VK_API_VERSION_MAJOR(pProperties->properties.apiVersion),
+             (unsigned)VK_API_VERSION_MINOR(pProperties->properties.apiVersion),
+             (unsigned)VK_API_VERSION_PATCH(pProperties->properties.apiVersion));
+        pProperties->properties.apiVersion = VK_MAKE_API_VERSION(1, 2, 0);
+    }
+
     uint32_t depth = 0;
     auto* next = reinterpret_cast<VkBaseOutStructure*>(pProperties->pNext);
     while (next && depth++ < 64) {
@@ -1174,6 +1260,9 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
         std::strcmp(pName, "vkGetPhysicalDeviceFeatures2KHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetPhysicalDeviceFeatures2);
     if (std::strcmp(pName, "vkGetPhysicalDeviceProperties2") == 0 ||
         std::strcmp(pName, "vkGetPhysicalDeviceProperties2KHR") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetPhysicalDeviceProperties2);
+    // M19: also intercept the Vulkan1.0 properties entry point, so apiVersion is
+    // lifted to 1.2.0 even when the host never calls the Properties2 flavour.
+    if (std::strcmp(pName, "vkGetPhysicalDeviceProperties") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkGetPhysicalDeviceProperties);
     if (std::strcmp(pName, "vkEnumerateDeviceExtensionProperties") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkEnumerateDeviceExtensionProperties);
     if (std::strcmp(pName, "vkEnumeratePhysicalDevices") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkEnumeratePhysicalDevices);
 
