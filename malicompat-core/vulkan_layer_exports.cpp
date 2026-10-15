@@ -616,6 +616,34 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
         const VkBool32 wasIB = pFeatures->independentBlend;
         pFeatures->independentBlend = VK_TRUE;
         LOGI("M18: independentBlend %d -> VK_TRUE (DibujosVulkan::Inicializar gate)", (int)wasIB);
+
+        // M25: vertexPipelineStoresAndAtomics spoof, for the with_gpu_emulation
+        // experiment ONLY.
+        //
+        // vulkan_device.cpp:121 makes this an unconditional gate:
+        //     if (!supported_features.vertexPipelineStoresAndAtomics) return nullptr;
+        // This device reports 0, so any run with with_gpu_emulation = true dies at
+        // device creation before reaching anything else. Measured on Mali-G71:
+        // fragmentStoresAndAtomics = 1, vertexPipelineStoresAndAtomics = 0.
+        //
+        // The M4 note here used to say spoofing this "lets feature gates pass, but
+        // the vendor then rejects vkCreateDevice (routed straight to it, bypassing
+        // our sanitizer)". That is no longer true: M20 added a real
+        // malicompat_vkCreateDevice that resolves the vendor function, and M24
+        // added a pEnabledFeatures sanitiser that clears every bit the driver does
+        // not support, by name, before the driver ever sees it. So the spoof can
+        // now satisfy the gate without becoming a hard requirement.
+        //
+        // vkCreateDevice is the only consumer that matters here: XE_UI_VULKAN_FEATURE
+        // copies supported_features wholesale into enabled_features, which is what
+        // pEnabledFeatures is. The M24 sanitiser strips it back out again.
+        const VkBool32 wasVPSA = pFeatures->vertexPipelineStoresAndAtomics;
+        if (!wasVPSA) {
+            pFeatures->vertexPipelineStoresAndAtomics = VK_TRUE;
+            LOGI("M25: vertexPipelineStoresAndAtomics %d -> VK_TRUE (with_gpu_emulation "
+                 "experiment; M24 sanitiser will strip it back before the driver)",
+                 (int)wasVPSA);
+        }
         // M7b: log the full gate-relevant set + whether vendor resolution worked.
         LOGI("vkGetPhysicalDeviceFeatures via=%s independentBlend=%d fragmentStoresAndAtomics=%d vertexPipelineStoresAndAtomics=%d geometryShader=%d fillModeNonSolid=%d samplerAnisotropy=%d",
              realPfn ? "vendor" : "NONE(ZEROS?)",
