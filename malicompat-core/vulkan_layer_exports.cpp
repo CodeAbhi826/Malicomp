@@ -1,6 +1,8 @@
 #include "vulkan_layer_exports.h"
 #include "descriptor_shim.h"
 #include <cstring>
+#include <cstdarg>
+#include <cstdio>
 #include <dlfcn.h>
 #include <unordered_map>
 #include <atomic>
@@ -158,6 +160,112 @@ VkDevice g_last_vendor_device = VK_NULL_HANDLE;
 // fallback would return). Wrappers call these; no plain ELF exports.
 PFN_vkAcquireImageANDROID g_exact_AcquireImage = nullptr;
 PFN_vkQueueSignalReleaseImageANDROID g_exact_SignalRelease = nullptr;
+
+// Phase 4: MaliCompatFlightRecorder. Persistent on-device log (logcat rolls
+// over), ZERO behavior change: never alters a returned pointer or VkResult.
+// Covers AcquireImage/SignalRelease only via observation, never interception.
+namespace flight {
+FILE* g_file = nullptr;
+std::atomic<uint32_t> g_hal_open{0};
+std::atomic<uint32_t> g_create_instance{0};
+std::atomic<uint32_t> g_create_device{0};
+std::atomic<uint32_t> g_get_queue{0};
+std::atomic<uint32_t> g_q0_queues{0};
+std::atomic<uint32_t> g_q1_queues{0};
+std::atomic<uint32_t> g_swapchain{0};
+std::atomic<uint32_t> g_swap_images{0};
+std::atomic<uint32_t> g_pipe_gfx{0};
+std::atomic<uint32_t> g_pipe_comp{0};
+std::atomic<uint32_t> g_submit{0};
+std::atomic<uint32_t> g_submit_ok{0};
+std::atomic<uint32_t> g_submit_q0{0};
+std::atomic<uint32_t> g_submit_q1{0};
+std::atomic<uint32_t> g_present_q{0};
+std::atomic<uint32_t> g_present_ok{0};
+std::atomic<uint32_t> g_summary_n{0};
+
+FILE* file() {
+    if (g_file) return g_file;
+    const char* cands[] = {
+        "/sdcard/Android/data/io.github.nfsmwrecomp/files/malicompat_flight.log",
+        "/data/local/tmp/malicompat_flight.log",
+        nullptr
+    };
+    for (int i = 0; cands[i]; ++i) {
+        FILE* f = fopen(cands[i], "a");
+        if (f) {
+            setvbuf(f, nullptr, _IONBF, 0);
+            g_file = f;
+            return f;
+        }
+    }
+    return nullptr;
+}
+void line(const char* fmt, ...) {
+    FILE* f = file();
+    if (!f) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fflush(f);
+}
+void maps_snapshot(const char* why) {
+    FILE* f = file();
+    if (!f) return;
+    FILE* m = fopen("/proc/self/maps", "r");
+    if (!m) return;
+    fprintf(f, "--- [MAPS] %s ---\n", why);
+    char buf[1024];
+    while (fgets(buf, sizeof(buf), m)) {
+        if (strstr(buf, ".so") || strstr(buf, "memfd")) fputs(buf, f);
+    }
+    fprintf(f, "--- [MAPS END] ---\n");
+    fflush(f);
+    fclose(m);
+}
+void proclog(const char* api, const char* name, PFN_vkVoidFunction pfn, void* caller) {
+    static std::atomic<uint32_t> n{0};
+    uint32_t k = ++n;
+    if (k > 400) return;
+    char tb[256];
+    Dl_info ci{};
+    const char* cn = "?";
+    if (caller && dladdr(caller, &ci) && ci.dli_fname) cn = ci.dli_fname;
+    Dl_info ti{};
+    const char* tn = "?";
+    uintptr_t off = 0;
+    if (pfn && dladdr(reinterpret_cast<void*>(pfn), &ti) && ti.dli_fname) {
+        tn = ti.dli_fname;
+        off = (uintptr_t)pfn - (uintptr_t)ti.dli_fbase;
+    }
+    snprintf(tb, sizeof(tb), "%s", tn);
+    char flag[64] = "";
+    bool wsi = name && (strstr(name, "Swapchain") || strstr(name, "Present") ||
+               strstr(name, "Surface") || strstr(name, "AcquireNextImage"));
+    if (wsi && cn && strstr(cn, "memfd") && tn && strncmp(tn, "/system", 7) == 0) {
+        snprintf(flag, sizeof(flag), " STATUS=DUAL_LOADER_WSI_MISMATCH");
+    }
+    line("[SELF-TEST][PROC] #%u api=%s sym=%s caller=%s -> pfn=%p target=%s+%#zx%s",
+         k, api, name ? name : "(null)", cn, (void*)pfn, tb, off, flag);
+}
+void summary() {
+    uint32_t n = ++g_summary_n;
+    line("# ================ [MALICOMPAT TIMELINE SUMMARY #%u] ================", n);
+    line("#01 HAL Open              : hits=%u", g_hal_open.load());
+    line("#02 vkCreateInstance      : hits=%u", g_create_instance.load());
+    line("#03 vkCreateDevice        : hits=%u", g_create_device.load());
+    line("#04 vkGetDeviceQueue      : hits=%u q0=%u q1=%u", g_get_queue.load(), g_q0_queues.load(), g_q1_queues.load());
+    line("#05 vkCreateSwapchain     : hits=%u", g_swapchain.load());
+    line("#06 vkGetSwapchainImages  : hits=%u", g_swap_images.load());
+    line("#07 Pipelines gfx/comp    : %u/%u", g_pipe_gfx.load(), g_pipe_comp.load());
+    line("#08 AcquireNextImage      : presenter-path (see game.log C7)");
+    line("#09 vkQueueSubmit         : hits=%u ok=%u", g_submit.load(), g_submit_ok.load());
+    line("#10 vkQueuePresentKHR     : hits=%u ok=%u", g_present_q.load(), g_present_ok.load());
+    line("# --> END SUMMARY #%u", n);
+}
+}  // namespace flight
 
 // M15: queue->device tracking for submit resolution (defined here, used by
 // vkQueueSubmit below and populated by vkGetDeviceQueue further down).
@@ -397,6 +505,7 @@ static VkResult VKAPI_CALL malicompat_hal_CreateInstance(
 
 static int malicompat_hal_open(const struct hw_module_t* module, const char* id, struct hw_device_t** device) {
     LOGI("MaliCompat HAL open called: id=%s", id ? id : "null");
+    flight::g_hal_open++;
     InitRealVulkan();
 
     if (g_vendor_vulkan) {
@@ -938,6 +1047,11 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDevice(
     VkResult res = realCreate(physicalDevice, &modifiedCreateInfo, pAllocator, pDevice);
     LOGI("Vendor vkCreateDevice returned: %d (device=%p)", res, pDevice ? *pDevice : nullptr);
 
+    flight::g_create_device++;
+    {
+        static bool s_maps_done = false;
+        if (!s_maps_done) { s_maps_done = true; flight::maps_snapshot("first-vkCreateDevice"); }
+    }
     // Initialize dummy fallback resources on the newly created device (F8)
     if (res == VK_SUCCESS && pDevice && *pDevice) {
         g_last_vendor_device = *pDevice;
@@ -1155,6 +1269,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
             LOGI("GetInstanceProcAddr default: '%s' -> %p", pName, pfn);
         }
     }
+    flight::proclog("GIPA", pName, pfn, __builtin_return_address(0));
     return pfn;
 }
 
@@ -1263,6 +1378,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
             LOGI("GetDeviceProcAddr default: '%s' -> %p", pName, pfn);
         }
     }
+    flight::proclog("GDPA", pName, pfn, __builtin_return_address(0));
     return pfn;
 }
 
@@ -1716,6 +1832,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateSwapchainKHR
     const VkAllocationCallbacks* pAllocator,
     VkSwapchainKHR* pSwapchain) {
     InitRealVulkan();
+    flight::g_swapchain++;
     if (g_system_vkCreateSwapchainKHR) {
         return g_system_vkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
     }
@@ -1747,6 +1864,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkGetSwapchainImages
     uint32_t* pSwapchainImageCount,
     VkImage* pSwapchainImages) {
     InitRealVulkan();
+    flight::g_swap_images++;
     if (g_system_vkGetSwapchainImagesKHR) {
         return g_system_vkGetSwapchainImagesKHR(device, swapchain, pSwapchainImageCount, pSwapchainImages);
     }
@@ -1798,6 +1916,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueuePresentKHR(
     // M9: bounded present tracing (first calls + periodic + errors).
     static uint32_t s_present_count = 0;
     ++s_present_count;
+    flight::g_present_q++;
     const bool log_this = (s_present_count <= 5) || (s_present_count % 500 == 0);
 
     // 1. Cross-Driver alignment: Because VkQueue is allocated on the vendor Mali device (g_vendor_device),
@@ -1816,6 +1935,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueuePresentKHR(
     }
     if (vendorPresent) {
         VkResult res = vendorPresent(queue, pPresentInfo);
+        if (res == VK_SUCCESS) flight::g_present_ok++;
         if (log_this || res != VK_SUCCESS) {
             LOGI("vkQueuePresentKHR #%u -> %d (swapchains=%u)", s_present_count, (int)res,
                  pPresentInfo ? pPresentInfo->swapchainCount : 0);
@@ -1826,6 +1946,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueuePresentKHR(
     // 2. Fallback to system loader only if vendor driver does not export vkQueuePresentKHR
     if (g_system_vkQueuePresentKHR) {
         VkResult res = g_system_vkQueuePresentKHR(queue, pPresentInfo);
+        if (res == VK_SUCCESS) flight::g_present_ok++;
         LOGI("vkQueuePresentKHR #%u -> %d via system loader", s_present_count, (int)res);
         return res;
     }
@@ -1833,6 +1954,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueuePresentKHR(
         auto pfn = reinterpret_cast<PFN_vkQueuePresentKHR>(dlsym(g_system_vulkan, "vkQueuePresentKHR"));
         if (pfn) {
             VkResult res = pfn(queue, pPresentInfo);
+            if (res == VK_SUCCESS) flight::g_present_ok++;
             LOGI("vkQueuePresentKHR #%u -> %d via system dlsym", s_present_count, (int)res);
             return res;
         }
@@ -1879,6 +2001,12 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkQueueSubmit(
 
     if (realSubmit) {
         VkResult res = realSubmit(queue, submitCount, pSubmits, fence);
+        {
+            uint32_t sc = ++flight::g_submit;
+            if (res == VK_SUCCESS) flight::g_submit_ok++;
+            if (sc == 300) flight::maps_snapshot("submit-300");
+            if (sc % 300 == 0) flight::summary();
+        }
         if (s_submit_count <= 5 || (s_submit_count % 1000 == 0) || res != VK_SUCCESS) {
             LOGI("vkQueueSubmit #%u: count=%u fence=%p -> %d", s_submit_count,
                  submitCount, (const void*)fence, (int)res);
@@ -2163,6 +2291,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateGraphicsPipe
     LOGI("pipe#%u: forwarding %u gfx infos to vendor", n, createInfoCount);
     VkResult res = realFunc(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
     LOGI("pipe#%u: vendor returned %d", n, res);
+    if (res == VK_SUCCESS) flight::g_pipe_gfx++;
     return res;
 }
 
@@ -2190,7 +2319,9 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateComputePipel
         LOGE("pipe#%u: no vendor vkCreateComputePipelines", n);
         return VK_ERROR_INITIALIZATION_FAILED;
     }
-    return realFunc(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+    VkResult cres = realFunc(device, pipelineCache, createInfoCount, pCreateInfos, pAllocator, pPipelines);
+    if (cres == VK_SUCCESS) flight::g_pipe_comp++;
+    return cres;
 }
 
 // M17: VK_ANDROID_native_buffer tracers (see header). Fail loud when the
@@ -2363,6 +2494,21 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetDeviceQueue(
         g_queue_to_device[*pQueue] = device;
         LOGI("vkGetDeviceQueue: family=%u index=%u queue=%p device=%p",
              queueFamilyIndex, queueIndex, (const void*)*pQueue, (const void*)device);
+        flight::g_get_queue++;
+        if (queueIndex == 0) flight::g_q0_queues++; else flight::g_q1_queues++;
+        {
+            static uint32_t s_qlog = 0;
+            if (s_qlog < 10) {
+                ++s_qlog;
+                Dl_info dq{};
+                const char* dqn = "?";
+                void* cb = __builtin_return_address(0);
+                if (cb && dladdr(cb, &dq) && dq.dli_fname) dqn = dq.dli_fname;
+                flight::line("[SELF-TEST][QUEUE] vkGetDeviceQueue #%u: family=%u index=%u queue=%p caller=%s",
+                             s_qlog, queueFamilyIndex, queueIndex, pQueue ? (void*)*pQueue : nullptr, dqn);
+                if (queueIndex == 1) flight::line("[SELF-TEST][QUEUE] CRITICAL: second queue requested (index=1)!");
+            }
+        }
     }
 }
 
@@ -2419,6 +2565,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(V
 }
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkInstance* pInstance) {
     InitRealVulkan();
+    flight::g_create_instance++;
     if (g_vendor_device && g_vendor_device->CreateInstance) {
         return g_vendor_device->CreateInstance(pCreateInfo, pAllocator, pInstance);
     }
