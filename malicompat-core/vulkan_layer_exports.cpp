@@ -1478,6 +1478,29 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateDescriptorSe
     const VkAllocationCallbacks* pAllocator,
     VkDescriptorSetLayout* pSetLayout) {
     InitRealVulkan();
+    // M23: descriptor-set-layout tracer. The guest's four-set packing is only
+    // correct if the layout matches what its (already remapped) shaders declare:
+    // set 0 = 2D heap, set 1 = 3D heap + cube heap at binding 1, set 2 = samplers,
+    // set 3 = UBOs. Any divergence surfaces only as VK_ERROR_INITIALIZATION_FAILED
+    // from vkCreateGraphicsPipelines, so dump every binding plus any
+    // descriptor-indexing flags carried in pNext.
+    if (pCreateInfo) {
+        LOGI("dsl: setLayout bindingCount=%u flags=0x%x",
+             (unsigned)pCreateInfo->bindingCount, (unsigned)pCreateInfo->flags);
+        for (uint32_t i = 0; i < pCreateInfo->bindingCount && i < 16; ++i) {
+            const auto& b = pCreateInfo->pBindings[i];
+            LOGI("dsl:   binding[%u] binding=%u type=%d count=%u stages=0x%x",
+                 i, (unsigned)b.binding, (int)b.descriptorType, (unsigned)b.descriptorCount,
+                 (unsigned)b.stageFlags);
+        }
+        const auto* node = reinterpret_cast<const VkBaseInStructure*>(pCreateInfo->pNext);
+        uint32_t depth = 0;
+        while (node && depth < 8) {
+            LOGI("dsl:   setLayout pNext[%u] sType=%d", depth, (int)node->sType);
+            node = reinterpret_cast<const VkBaseInStructure*>(node->pNext);
+            ++depth;
+        }
+    }
     // M13: g_vendor_vkCreateDescriptorSetLayout comes from dlsym on the HAL
     // .so, which is NULL in HAL mode (device procs only via GetProcAddr).
     // Resolve against the live instance first, like the pool wrapper does.
@@ -2133,6 +2156,25 @@ MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreatePipelineLayo
         LOGW("malicompat_vkCreatePipelineLayout: clamping setLayoutCount from %u to 4 (Mali-G71 hardware limit)",
              sanitizedInfo.setLayoutCount);
         sanitizedInfo.setLayoutCount = 4;
+    }
+
+    // M23: always report the layout shape. Previously we only logged when clamping,
+    // so a layout that was within spec but inconsistent with the shaders (which is
+    // what VK_ERROR_INITIALIZATION_FAILED from vkCreateGraphicsPipelines usually
+    // means) was completely invisible. Set count alone is not enough: the guest's
+    // four-descriptor-set packing moves the cube heap into binding 1 of the 3D set
+    // and shifts the UBO set, so we also want the pNext flags that carry
+    // VK_DESCRIPTOR_BINDING_* and the push-constant range.
+    LOGI("dsl: pipelineLayout setLayoutCount=%u pushConstantRanges=%u",
+         sanitizedInfo.setLayoutCount, (unsigned)sanitizedInfo.pushConstantRangeCount);
+    {
+        const auto* node = reinterpret_cast<const VkBaseInStructure*>(sanitizedInfo.pNext);
+        uint32_t depth = 0;
+        while (node && depth < 8) {
+            LOGI("dsl: pipelineLayout pNext[%u] sType=%d", depth, (int)node->sType);
+            node = reinterpret_cast<const VkBaseInStructure*>(node->pNext);
+            ++depth;
+        }
     }
 
     PFN_vkCreatePipelineLayout realFunc = reinterpret_cast<PFN_vkCreatePipelineLayout>(
