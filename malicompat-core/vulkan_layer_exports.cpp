@@ -759,8 +759,10 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
             v11->protectedMemory = VK_FALSE;
             v11->samplerYcbcrConversion = VK_TRUE;
             LOGI("M19: intercepted VkPhysicalDeviceVulkan11Features");
+#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES
         } else if (next->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES) {
             LOGI("M19: chained VkPhysicalDeviceVulkan13Features (passthrough)");
+#endif
         }
         next = next->pNext;
     }
@@ -780,13 +782,20 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceFeatu
 //   [error] [nativo] C6: el dispositivo Vulkan no tiene independentBlend: no se dibuja
 // Reporting 1.2.0 gives the runtime the descriptor-indexing core path instead of
 // making it depend on VK_EXT_descriptor_indexing being enabled.
+//
+// NOTE: we encode apiVersion arithmetically rather than with VK_MAKE_API_VERSION /
+// VK_API_VERSION_MAJOR, which are absent from the Vulkan headers this project builds
+// against. Layout per the Vulkan spec:
+//   apiVersion = (variant << 29) | (major << 22) | (minor << 12) | patch
+static constexpr uint32_t kMalicompatApiVersion12 = (1u << 22) | (2u << 12);
+
 MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceProperties(
     VkPhysicalDevice physicalDevice,
     VkPhysicalDeviceProperties* pProperties) {
     InitRealVulkan();
     PFN_vkGetPhysicalDeviceProperties realPfn = nullptr;
     if (g_vendor_device && g_vendor_device->GetInstanceProcAddr) {
-        realPfn = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures>(
+        realPfn = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
             malicompat_vendor_proc("vkGetPhysicalDeviceProperties"));
     }
     if (!realPfn && g_vendor_vkGetPhysicalDeviceProperties) {
@@ -800,10 +809,10 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDevicePrope
     // M19: lift apiVersion to 1.2.0 so descriptor indexing is core rather than an
     // extension the host must remember to enable.
     const uint32_t wasApi = pProperties->apiVersion;
-    pProperties->apiVersion = VK_MAKE_API_VERSION(1, 2, 0);
-    LOGI("M19: vkGetPhysicalDeviceProperties apiVersion %u -> %u (driver %s)",
-         (unsigned)VK_API_VERSION_MAJOR(wasApi), (unsigned)VK_API_VERSION_MAJOR(pProperties->apiVersion),
-         pProperties->deviceName);
+    pProperties->apiVersion = kMalicompatApiVersion12;
+    LOGI("M19: vkGetPhysicalDeviceProperties apiVersion %u.%u -> %u.%u (device '%s')",
+         (unsigned)((wasApi >> 22) & 0x7Fu), (unsigned)((wasApi >> 12) & 0x3FFu),
+         1u, 2u, pProperties->deviceName);
 }
 
 MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDeviceProperties2(
@@ -843,12 +852,13 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkGetPhysicalDevicePrope
 
     // Intercept pNext chain to expose spoofed descriptor indexing limits (F3)
     // M19: same apiVersion lift as the vk1 entry point.
-    if (pProperties->properties.apiVersion < VK_MAKE_API_VERSION(1, 2, 0)) {
+    if (pProperties->properties.apiVersion < kMalicompatApiVersion12) {
+        const uint32_t wasApi = pProperties->properties.apiVersion;
+        pProperties->properties.apiVersion = kMalicompatApiVersion12;
         LOGI("M19: Properties2 apiVersion %u.%u.%u -> 1.2.0",
-             (unsigned)VK_API_VERSION_MAJOR(pProperties->properties.apiVersion),
-             (unsigned)VK_API_VERSION_MINOR(pProperties->properties.apiVersion),
-             (unsigned)VK_API_VERSION_PATCH(pProperties->properties.apiVersion));
-        pProperties->properties.apiVersion = VK_MAKE_API_VERSION(1, 2, 0);
+             (unsigned)((wasApi >> 22) & 0x7Fu),
+             (unsigned)((wasApi >> 12) & 0x3FFu),
+             (unsigned)(wasApi & 0xFFFu));
     }
 
     uint32_t depth = 0;
