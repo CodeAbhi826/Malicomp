@@ -1575,7 +1575,6 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
     if (std::strcmp(pName, "vkCmdDraw") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDraw);
     if (std::strcmp(pName, "vkCmdDrawIndexed") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndexed);
     if (std::strcmp(pName, "vkCmdDrawIndirect") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndirect);
-    if (std::strcmp(pName, "vkCmdDrawIndirectCount") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndirectCount);
 
     // Query Interception (F6)
     if (std::strcmp(pName, "vkCreateQueryPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateQueryPool);
@@ -1669,7 +1668,6 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
     if (std::strcmp(pName, "vkCmdDraw") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDraw);
     if (std::strcmp(pName, "vkCmdDrawIndexed") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndexed);
     if (std::strcmp(pName, "vkCmdDrawIndirect") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndirect);
-    if (std::strcmp(pName, "vkCmdDrawIndirectCount") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndirectCount);
 
     // Query Interception (F6)
     if (std::strcmp(pName, "vkCreateQueryPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateQueryPool);
@@ -1955,16 +1953,17 @@ void MaybeLogDrawStats() {
 
 // Resolve a device-level proc using the same instance-then-device fallback the
 // other interceptors use, so the tracer works no matter which domain the guest
-// reached the function through.
-template <typename PFN>
-PFN ResolveDrawProc(const char* name) {
-    PFN fn = nullptr;
+// reached the function through. Returns void* rather than being a template:
+// this code sits inside extern "C", where templates are ill-formed.
+static void* ResolveDrawProcRaw(const char* name) {
     if (g_last_vendor_device != VK_NULL_HANDLE) {
-        fn = reinterpret_cast<PFN>(malicompat_resolve_vendor_device_proc(g_last_vendor_device, name));
+        void* p = malicompat_resolve_vendor_device_proc(g_last_vendor_device, name);
+        if (p) return p;
     }
-    if (!fn) fn = reinterpret_cast<PFN>(malicompat_vendor_proc(name));
-    if (!fn && g_vendor_vulkan) fn = reinterpret_cast<PFN>(dlsym(g_vendor_vulkan, name));
-    return fn;
+    void* p = malicompat_vendor_proc(name);
+    if (p) return p;
+    if (g_vendor_vulkan) return dlsym(g_vendor_vulkan, name);
+    return nullptr;
 }
 } // namespace
 
@@ -1976,7 +1975,7 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDraw(
     g_drawStats.vertices += vertexCount;
     g_drawStats.instances += instanceCount;
     MaybeLogDrawStats();
-    auto real = ResolveDrawProc<PFN_vkCmdDraw>("vkCmdDraw");
+    auto real = reinterpret_cast<PFN_vkCmdDraw>(ResolveDrawProcRaw("vkCmdDraw"));
     if (real) real(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
@@ -1988,27 +1987,17 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDrawIndexed(
     g_drawStats.vertices += indexCount;
     g_drawStats.instances += instanceCount;
     MaybeLogDrawStats();
-    auto real = ResolveDrawProc<PFN_vkCmdDrawIndexed>("vkCmdDrawIndexed");
+    auto real = reinterpret_cast<PFN_vkCmdDrawIndexed>(ResolveDrawProcRaw("vkCmdDrawIndexed"));
     if (real) real(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
 MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDrawIndirect(
-    VkCommandBuffer commandBuffer, const VkDrawIndirectCommandInfo* pDrawInfo) {
+    VkCommandBuffer commandBuffer, const VkDrawIndirectCommand* pDrawInfo) {
     InitRealVulkan();
     ++g_drawStats.drawIndirect;
     MaybeLogDrawStats();
-    auto real = ResolveDrawProc<PFN_vkCmdDrawIndirect>("vkCmdDrawIndirect");
+    auto real = reinterpret_cast<PFN_vkCmdDrawIndirect>(ResolveDrawProcRaw("vkCmdDrawIndirect"));
     if (real) real(commandBuffer, pDrawInfo);
-}
-
-MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDrawIndirectCount(
-    VkCommandBuffer commandBuffer, const VkDrawIndirectCommandInfo* pDrawInfo,
-    uint32_t drawCount, uint32_t stride) {
-    InitRealVulkan();
-    ++g_drawStats.drawIndirectCount;
-    MaybeLogDrawStats();
-    auto real = ResolveDrawProc<PFN_vkCmdDrawIndirectCount>("vkCmdDrawIndirectCount");
-    if (real) real(commandBuffer, pDrawInfo, drawCount, stride);
 }
 
 // Query Interception: Safe Virtual Query Pool Handler (F6)

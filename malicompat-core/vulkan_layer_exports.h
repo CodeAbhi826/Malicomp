@@ -115,6 +115,22 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdBindDescriptorSets(
     uint32_t dynamicOffsetCount,
     const uint32_t* pDynamicOffsets);
 
+// Draw tracer (A8): distinguishes "guest never draws" from "draws rejected".
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDraw(
+    VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount,
+    uint32_t firstVertex, uint32_t firstInstance);
+
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDrawIndexed(
+    VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t instanceCount,
+    uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance);
+
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDrawIndirect(
+    VkCommandBuffer commandBuffer, const VkDrawIndirectCommand* pDrawInfo);
+
+// Note: vkCmdDrawIndirectCount is deliberately not traced. Its
+// VkDrawIndirectCommandInfo parameter is Vulkan 1.2-only and these headers do
+// not declare it. A 360-era renderer will not use it.
+
 // Query interception: safely neuters occlusion queries on ARM Mali
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateQueryPool(
     VkDevice device,
