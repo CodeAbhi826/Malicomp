@@ -1572,6 +1572,10 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
     if (std::strcmp(pName, "vkAllocateDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkAllocateDescriptorSets);
     if (std::strcmp(pName, "vkUpdateDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkUpdateDescriptorSets);
     if (std::strcmp(pName, "vkCmdBindDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdBindDescriptorSets);
+    if (std::strcmp(pName, "vkCmdDraw") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDraw);
+    if (std::strcmp(pName, "vkCmdDrawIndexed") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndexed);
+    if (std::strcmp(pName, "vkCmdDrawIndirect") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndirect);
+    if (std::strcmp(pName, "vkCmdDrawIndirectCount") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndirectCount);
 
     // Query Interception (F6)
     if (std::strcmp(pName, "vkCreateQueryPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateQueryPool);
@@ -1662,6 +1666,10 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
     if (std::strcmp(pName, "vkAllocateDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkAllocateDescriptorSets);
     if (std::strcmp(pName, "vkUpdateDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkUpdateDescriptorSets);
     if (std::strcmp(pName, "vkCmdBindDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdBindDescriptorSets);
+    if (std::strcmp(pName, "vkCmdDraw") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDraw);
+    if (std::strcmp(pName, "vkCmdDrawIndexed") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndexed);
+    if (std::strcmp(pName, "vkCmdDrawIndirect") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndirect);
+    if (std::strcmp(pName, "vkCmdDrawIndirectCount") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndirectCount);
 
     // Query Interception (F6)
     if (std::strcmp(pName, "vkCreateQueryPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateQueryPool);
@@ -1883,6 +1891,124 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdBindDescriptorSets(
     }
     malicompat::VulkanDescriptorShim::Instance().InterceptCmdBindDescriptorSets(
         commandBuffer, pipelineBindPoint, layout, firstSet, descriptorSetCount, pDescriptorSets, dynamicOffsetCount, pDynamicOffsets, realBind);
+}
+
+// ---------------------------------------------------------------------------
+// A8: draw tracer.
+//
+// The black screen showed 8 pipelines, thousands of successful vkQueueSubmit,
+// and ZERO vkQueuePresentKHR. That leaves exactly two hypotheses, and they
+// need opposite fixes:
+//   (a) the guest never issues a draw at all  -> the native renderer bailed
+//       out early, and the descriptor-limit rejection (cause 53) is the cause
+//   (b) the guest issues thousands of draws   -> they are being rejected or
+//       the present path is broken, a completely different problem
+// Nothing observable so far distinguishes these, because we were only
+// tracing binds and submits, never the draws themselves. These counters do.
+// ---------------------------------------------------------------------------
+namespace {
+struct DrawStats {
+    uint64_t draw = 0;
+    uint64_t drawIndexed = 0;
+    uint64_t drawIndirect = 0;
+    uint64_t drawIndirectCount = 0;
+    uint64_t vertices = 0;
+    uint64_t instances = 0;
+    uint64_t beginRenderPass = 0;
+    uint64_t endRenderPass = 0;
+};
+DrawStats g_drawStats;
+uint64_t g_lastLoggedDraws = 0;
+bool g_drawStatsLoggedOnce = false;
+
+void MaybeLogDrawStats() {
+    const uint64_t total = g_drawStats.draw + g_drawStats.drawIndexed +
+                           g_drawStats.drawIndirect + g_drawStats.drawIndirectCount;
+    // Log the first observation immediately: "0 draws ever" is itself the
+    // finding we are hunting for, so silence must not swallow it.
+    if (!g_drawStatsLoggedOnce) {
+        g_drawStatsLoggedOnce = true;
+        g_lastLoggedDraws = total;
+        LOGW("A8: FIRST SAMPLE draws=%llu indexed=%llu indirect=%llu indirectCount=%llu "
+             "verts=%llu instances=%llu renderPass=%llu",
+             (unsigned long long)g_drawStats.draw,
+             (unsigned long long)g_drawStats.drawIndexed,
+             (unsigned long long)g_drawStats.drawIndirect,
+             (unsigned long long)g_drawStats.drawIndirectCount,
+             (unsigned long long)g_drawStats.vertices,
+             (unsigned long long)g_drawStats.instances,
+             (unsigned long long)g_drawStats.beginRenderPass);
+        return;
+    }
+    if (total - g_lastLoggedDraws < 2000) return;
+    g_lastLoggedDraws = total;
+    LOGW("A8: draws=%llu indexed=%llu indirect=%llu indirectCount=%llu verts=%llu "
+         "instances=%llu renderPass=%llu",
+         (unsigned long long)g_drawStats.draw,
+         (unsigned long long)g_drawStats.drawIndexed,
+         (unsigned long long)g_drawStats.drawIndirect,
+         (unsigned long long)g_drawStats.drawIndirectCount,
+         (unsigned long long)g_drawStats.vertices,
+         (unsigned long long)g_drawStats.instances,
+         (unsigned long long)g_drawStats.beginRenderPass);
+}
+
+// Resolve a device-level proc using the same instance-then-device fallback the
+// other interceptors use, so the tracer works no matter which domain the guest
+// reached the function through.
+template <typename PFN>
+PFN ResolveDrawProc(const char* name) {
+    PFN fn = nullptr;
+    if (g_last_vendor_device != VK_NULL_HANDLE) {
+        fn = reinterpret_cast<PFN>(malicompat_resolve_vendor_device_proc(g_last_vendor_device, name));
+    }
+    if (!fn) fn = reinterpret_cast<PFN>(malicompat_vendor_proc(name));
+    if (!fn && g_vendor_vulkan) fn = reinterpret_cast<PFN>(dlsym(g_vendor_vulkan, name));
+    return fn;
+}
+} // namespace
+
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDraw(
+    VkCommandBuffer commandBuffer, uint32_t vertexCount, uint32_t instanceCount,
+    uint32_t firstVertex, uint32_t firstInstance) {
+    InitRealVulkan();
+    ++g_drawStats.draw;
+    g_drawStats.vertices += vertexCount;
+    g_drawStats.instances += instanceCount;
+    MaybeLogDrawStats();
+    auto real = ResolveDrawProc<PFN_vkCmdDraw>("vkCmdDraw");
+    if (real) real(commandBuffer, vertexCount, instanceCount, firstVertex, firstInstance);
+}
+
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDrawIndexed(
+    VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t instanceCount,
+    uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) {
+    InitRealVulkan();
+    ++g_drawStats.drawIndexed;
+    g_drawStats.vertices += indexCount;
+    g_drawStats.instances += instanceCount;
+    MaybeLogDrawStats();
+    auto real = ResolveDrawProc<PFN_vkCmdDrawIndexed>("vkCmdDrawIndexed");
+    if (real) real(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+}
+
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDrawIndirect(
+    VkCommandBuffer commandBuffer, const VkDrawIndirectCommandInfo* pDrawInfo) {
+    InitRealVulkan();
+    ++g_drawStats.drawIndirect;
+    MaybeLogDrawStats();
+    auto real = ResolveDrawProc<PFN_vkCmdDrawIndirect>("vkCmdDrawIndirect");
+    if (real) real(commandBuffer, pDrawInfo);
+}
+
+MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDrawIndirectCount(
+    VkCommandBuffer commandBuffer, const VkDrawIndirectCommandInfo* pDrawInfo,
+    uint32_t drawCount, uint32_t stride) {
+    InitRealVulkan();
+    ++g_drawStats.drawIndirectCount;
+    MaybeLogDrawStats();
+    auto real = ResolveDrawProc<PFN_vkCmdDrawIndirectCount>("vkCmdDrawIndirectCount");
+    if (real) real(commandBuffer, pDrawInfo, drawCount, stride);
 }
 
 // Query Interception: Safe Virtual Query Pool Handler (F6)
