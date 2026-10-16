@@ -124,12 +124,10 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDrawIndexed(
     VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t instanceCount,
     uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance);
 
-MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDrawIndirect(
-    VkCommandBuffer commandBuffer, const VkDrawIndirectCommand* pDrawInfo);
-
-// Note: vkCmdDrawIndirectCount is deliberately not traced. Its
-// VkDrawIndirectCommandInfo parameter is Vulkan 1.2-only and these headers do
-// not declare it. A 360-era renderer will not use it.
+// Note: vkCmdDrawIndirect / vkCmdDrawIndirectCount are deliberately not
+// traced. Their PFN typedefs carry Vulkan 1.2-only parameters and types that
+// these headers do not declare, so they cannot be called portably here. A
+// 360-era renderer issuing vkCmdDraw / vkCmdDrawIndexed is the case we need.
 
 // Query interception: safely neuters occlusion queries on ARM Mali
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateQueryPool(

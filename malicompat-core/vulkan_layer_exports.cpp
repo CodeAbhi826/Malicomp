@@ -1574,7 +1574,6 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetInsta
     if (std::strcmp(pName, "vkCmdBindDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdBindDescriptorSets);
     if (std::strcmp(pName, "vkCmdDraw") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDraw);
     if (std::strcmp(pName, "vkCmdDrawIndexed") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndexed);
-    if (std::strcmp(pName, "vkCmdDrawIndirect") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndirect);
 
     // Query Interception (F6)
     if (std::strcmp(pName, "vkCreateQueryPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateQueryPool);
@@ -1667,7 +1666,6 @@ MALICOMPAT_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL malicompat_vkGetDevic
     if (std::strcmp(pName, "vkCmdBindDescriptorSets") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdBindDescriptorSets);
     if (std::strcmp(pName, "vkCmdDraw") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDraw);
     if (std::strcmp(pName, "vkCmdDrawIndexed") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndexed);
-    if (std::strcmp(pName, "vkCmdDrawIndirect") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCmdDrawIndirect);
 
     // Query Interception (F6)
     if (std::strcmp(pName, "vkCreateQueryPool") == 0) return reinterpret_cast<PFN_vkVoidFunction>(malicompat_vkCreateQueryPool);
@@ -1908,8 +1906,6 @@ namespace {
 struct DrawStats {
     uint64_t draw = 0;
     uint64_t drawIndexed = 0;
-    uint64_t drawIndirect = 0;
-    uint64_t drawIndirectCount = 0;
     uint64_t vertices = 0;
     uint64_t instances = 0;
     uint64_t beginRenderPass = 0;
@@ -1920,19 +1916,15 @@ uint64_t g_lastLoggedDraws = 0;
 bool g_drawStatsLoggedOnce = false;
 
 void MaybeLogDrawStats() {
-    const uint64_t total = g_drawStats.draw + g_drawStats.drawIndexed +
-                           g_drawStats.drawIndirect + g_drawStats.drawIndirectCount;
+    const uint64_t total = g_drawStats.draw + g_drawStats.drawIndexed;
     // Log the first observation immediately: "0 draws ever" is itself the
     // finding we are hunting for, so silence must not swallow it.
     if (!g_drawStatsLoggedOnce) {
         g_drawStatsLoggedOnce = true;
         g_lastLoggedDraws = total;
-        LOGW("A8: FIRST SAMPLE draws=%llu indexed=%llu indirect=%llu indirectCount=%llu "
-             "verts=%llu instances=%llu renderPass=%llu",
+        LOGW("A8: FIRST SAMPLE draws=%llu indexed=%llu verts=%llu instances=%llu renderPass=%llu",
              (unsigned long long)g_drawStats.draw,
              (unsigned long long)g_drawStats.drawIndexed,
-             (unsigned long long)g_drawStats.drawIndirect,
-             (unsigned long long)g_drawStats.drawIndirectCount,
              (unsigned long long)g_drawStats.vertices,
              (unsigned long long)g_drawStats.instances,
              (unsigned long long)g_drawStats.beginRenderPass);
@@ -1940,12 +1932,9 @@ void MaybeLogDrawStats() {
     }
     if (total - g_lastLoggedDraws < 2000) return;
     g_lastLoggedDraws = total;
-    LOGW("A8: draws=%llu indexed=%llu indirect=%llu indirectCount=%llu verts=%llu "
-         "instances=%llu renderPass=%llu",
+    LOGW("A8: draws=%llu indexed=%llu verts=%llu instances=%llu renderPass=%llu",
          (unsigned long long)g_drawStats.draw,
          (unsigned long long)g_drawStats.drawIndexed,
-         (unsigned long long)g_drawStats.drawIndirect,
-         (unsigned long long)g_drawStats.drawIndirectCount,
          (unsigned long long)g_drawStats.vertices,
          (unsigned long long)g_drawStats.instances,
          (unsigned long long)g_drawStats.beginRenderPass);
@@ -1953,16 +1942,17 @@ void MaybeLogDrawStats() {
 
 // Resolve a device-level proc using the same instance-then-device fallback the
 // other interceptors use, so the tracer works no matter which domain the guest
-// reached the function through. Returns void* rather than being a template:
-// this code sits inside extern "C", where templates are ill-formed.
-static void* ResolveDrawProcRaw(const char* name) {
+// reached the function through. Returns the generic Vulkan proc type: a plain
+// void* is not a valid target for a function-pointer rvalue, and a template is
+// ill-formed inside the extern "C" block this code lives in (file line 545).
+static PFN_vkVoidFunction ResolveDrawProcRaw(const char* name) {
     if (g_last_vendor_device != VK_NULL_HANDLE) {
-        void* p = malicompat_resolve_vendor_device_proc(g_last_vendor_device, name);
+        PFN_vkVoidFunction p = malicompat_resolve_vendor_device_proc(g_last_vendor_device, name);
         if (p) return p;
     }
-    void* p = malicompat_vendor_proc(name);
+    PFN_vkVoidFunction p = malicompat_vendor_proc(name);
     if (p) return p;
-    if (g_vendor_vulkan) return dlsym(g_vendor_vulkan, name);
+    if (g_vendor_vulkan) return reinterpret_cast<PFN_vkVoidFunction>(dlsym(g_vendor_vulkan, name));
     return nullptr;
 }
 } // namespace
@@ -1991,14 +1981,10 @@ MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDrawIndexed(
     if (real) real(commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
-MALICOMPAT_EXPORT VKAPI_ATTR void VKAPI_CALL malicompat_vkCmdDrawIndirect(
-    VkCommandBuffer commandBuffer, const VkDrawIndirectCommand* pDrawInfo) {
-    InitRealVulkan();
-    ++g_drawStats.drawIndirect;
-    MaybeLogDrawStats();
-    auto real = reinterpret_cast<PFN_vkCmdDrawIndirect>(ResolveDrawProcRaw("vkCmdDrawIndirect"));
-    if (real) real(commandBuffer, pDrawInfo);
-}
+// vkCmdDrawIndirect is deliberately not traced. Its PFN typedef gained the
+// (drawCount, stride) parameters in Vulkan 1.2, so its arity differs between
+// header versions and cannot be called portably from this layer. A 360-era
+// renderer issuing vkCmdDraw / vkCmdDrawIndexed is the case we need to measure.
 
 // Query Interception: Safe Virtual Query Pool Handler (F6)
 MALICOMPAT_EXPORT VKAPI_ATTR VkResult VKAPI_CALL malicompat_vkCreateQueryPool(
