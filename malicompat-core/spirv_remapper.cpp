@@ -150,6 +150,292 @@ uint32_t B9ProbeModule(const std::vector<uint32_t>& code) {
     return index;
 }
 
+// B10: rewrite descriptor arrays to lengths the Mali driver will accept.
+//
+// The B9 probe shows exactly what the driver refuses: the scene shaders declare
+// their heaps as RUNTIME arrays of images and samplers
+// ([s0 b0 img[] len=rt], [s2 b0 smp[] len=rt]). A runtime array in the shader
+// interface requires runtimeDescriptorArray, which this G71 does not have (M24),
+// so vkCreateGraphicsPipelines returns VK_ERROR_INITIALIZATION_FAILED (-3) for
+// every geometry pipeline -- the 13-of-13 causa 53 the engine reports. Fixed
+// arrays are not legal either while the guest keeps its own counts: 4096 sampled
+// images and 512 samplers exceed maxPerStageDescriptorSampledImages (256) and
+// maxPerStageDescriptorSamplers (128), and even the A4-clamped pair (256 + 128)
+// overflows maxPerStageResources (361) inside a single stage.
+//
+// So give every descriptor array a fixed length taken from the guest's four-set
+// shape (set 0 binding 0 -> 256 images, set 1 binding 0 -> 16, set 1 binding 1 ->
+// 64, set 2 binding 0 -> 128 samplers), then shrink greedily so the per-type sums
+// (256 images, 128 samplers) and the per-stage total all hold with a small
+// margin. This is safe in practice: the guest allocates its heaps densely from
+// slot 0 (A3 measured maxLogicalIndex 15 against ~26 live textures), the set
+// layouts still hold their clamped capacity, and every slot is dummy-filled
+// (F8), so even an out-of-range index lands on a valid dummy descriptor.
+//
+// The only thing this changes is array lengths: ids, decorations and every
+// instruction are left alone. Returns how many array types were rewritten.
+uint32_t B10ClampDescriptorArrays(std::vector<uint32_t>& code) {
+    enum {
+        kOpTypeInt = 21,
+        kOpTypeImage = 25,
+        kOpTypeSampler = 26,
+        kOpTypeSampledImage = 27,
+        kOpTypeArray = 28,
+        kOpTypeRuntimeArray = 29,
+        kOpTypePointer = 32,
+        kOpConstant = 43,
+        kOpFunction = 54,
+    };
+
+    if (code.size() < 5 || code[0] != 0x07230203) return 0;
+
+    // The A7 marker disables the A4/A6 descriptor clamps; honour it here too so
+    // the null hypothesis stays testable.
+    static const bool clampsDisabled = [] {
+        FILE* f = fopen("/data/user/0/io.github.nfsmwrecomp/files/noclamp", "r");
+        if (f) {
+            fclose(f);
+            return true;
+        }
+        return false;
+    }();
+    if (clampsDisabled) return 0;
+
+    std::unordered_map<uint32_t, uint32_t> typeOp, arrayElem, arrayLenConst, pointerTo;
+    std::unordered_map<uint32_t, uint32_t> setOf, bindingOf, constValue, constType;
+    std::vector<std::pair<uint32_t, uint32_t>> vars;  // (variable id, result type id)
+    uint32_t uintTypeId = 0;
+    uint32_t uniformVarCount = 0;  // UBO variables, counted against the stage total
+
+    for (size_t i = 5; i < code.size();) {
+        const uint32_t len = code[i] >> 16, op = code[i] & 0xFFFF;
+        if (len == 0 || i + len > code.size()) break;
+        if (op == kOpTypeInt && len >= 4 && code[i + 2] == 32 && code[i + 3] == 0 && !uintTypeId) {
+            uintTypeId = code[i + 1];
+        } else if (op == kOpConstant && len >= 4) {
+            constValue[code[i + 2]] = code[i + 3];
+            constType[code[i + 2]] = code[i + 1];
+        } else if (len >= 2 && (op == kOpTypeImage || op == kOpTypeSampler || op == kOpTypeSampledImage)) {
+            typeOp[code[i + 1]] = op;
+        } else if (op == kOpTypeArray && len >= 4) {
+            typeOp[code[i + 1]] = op;
+            arrayElem[code[i + 1]] = code[i + 2];
+            arrayLenConst[code[i + 1]] = code[i + 3];
+        } else if (op == kOpTypeRuntimeArray && len >= 3) {
+            typeOp[code[i + 1]] = op;
+            arrayElem[code[i + 1]] = code[i + 2];
+        } else if (op == kOpTypePointer && len >= 4) {
+            pointerTo[code[i + 1]] = code[i + 3];
+        } else if (op == SpirvRemapper::kOpDecorate && len >= 4) {
+            if (code[i + 2] == SpirvRemapper::kDecorationDescriptorSet) setOf[code[i + 1]] = code[i + 3];
+            else if (code[i + 2] == SpirvRemapper::kDecorationBinding) bindingOf[code[i + 1]] = code[i + 3];
+        } else if (op == SpirvRemapper::kOpVariable && len >= 4) {
+            if (code[i + 3] == 0 /*UniformConstant*/) {
+                vars.emplace_back(code[i + 2], code[i + 1]);
+            } else if (code[i + 3] == 2 /*Uniform*/) {
+                ++uniformVarCount;  // UBOs share maxPerStageResources with us
+            }
+        }
+        i += len;
+    }
+
+    // Which array types are descriptor arrays, and which (set, binding) use them?
+    struct Candidate {
+        uint32_t set;
+        uint32_t binding;
+    };
+    std::unordered_map<uint32_t, std::vector<Candidate>> arrayUsers;
+    for (const auto& v : vars) {
+        const auto ptr = pointerTo.find(v.second);
+        if (ptr == pointerTo.end()) continue;
+        const uint32_t t = ptr->second;
+        const auto tIt = typeOp.find(t);
+        if (tIt == typeOp.end() || (tIt->second != kOpTypeArray && tIt->second != kOpTypeRuntimeArray)) continue;
+        const auto eIt = arrayElem.find(t);
+        if (eIt == arrayElem.end()) continue;
+        const auto elemIt = typeOp.find(eIt->second);
+        if (elemIt == typeOp.end() || (elemIt->second != kOpTypeImage &&
+                                       elemIt->second != kOpTypeSampler &&
+                                       elemIt->second != kOpTypeSampledImage)) {
+            continue;
+        }
+        arrayUsers[t].push_back({setOf.count(v.first) ? setOf[v.first] : 0,
+                                 bindingOf.count(v.first) ? bindingOf[v.first] : 0});
+    }
+    if (arrayUsers.empty()) return 0;
+
+    struct ArrayEntry {
+        uint32_t typeId = 0;
+        uint32_t elemOp = 0;
+        uint32_t declaredLen = 0;  // 0xFFFFFFFF = runtime, 0xFFFFFFFE = unresolved
+        uint32_t finalLen = 0;
+    };
+    std::vector<ArrayEntry> entries;
+    for (const auto& kv : arrayUsers) {
+        const uint32_t t = kv.first;
+        const auto tIt = typeOp.find(t);
+        const auto eIt = arrayElem.find(t);
+        if (tIt == typeOp.end() || eIt == arrayElem.end()) continue;
+        ArrayEntry e;
+        e.typeId = t;
+        const auto elemIt = typeOp.find(eIt->second);
+        e.elemOp = elemIt != typeOp.end() ? elemIt->second : 0;
+        const bool isSampler = e.elemOp == kOpTypeSampler;
+        uint32_t limit = isSampler ? 128 : 256;
+        for (const auto& c : kv.second) {
+            uint32_t mapped = 0;
+            if (c.set == 0 && c.binding == 0) mapped = 256;
+            else if (c.set == 1 && c.binding == 0) mapped = 16;
+            else if (c.set == 1 && c.binding == 1) mapped = 64;
+            else if (c.set == 2 && c.binding == 0) mapped = 128;
+            if (mapped && mapped < limit) limit = mapped;
+        }
+        if (tIt->second == kOpTypeRuntimeArray) {
+            e.declaredLen = 0xFFFFFFFFu;
+            e.finalLen = limit;
+        } else {
+            uint32_t declared = 0xFFFFFFFEu;
+            const auto lc = arrayLenConst.find(t);
+            if (lc != arrayLenConst.end()) {
+                const auto cv = constValue.find(lc->second);
+                if (cv != constValue.end()) declared = cv->second;
+            }
+            e.declaredLen = declared;
+            e.finalLen = (declared != 0xFFFFFFFEu && declared < limit) ? declared : limit;
+        }
+        entries.push_back(e);
+    }
+
+    // Budget the stage: per-type sums and the total, keeping a small margin under
+    // maxPerStageResources (361) since UBOs and other resources share it.
+    auto sumByKind = [&](bool samplerKind) {
+        uint32_t s = 0;
+        for (const auto& e : entries) {
+            if ((e.elemOp == kOpTypeSampler) == samplerKind) s += e.finalLen;
+        }
+        return s;
+    };
+    auto shrinkLargest = [&](bool samplerKind, uint32_t excess, uint32_t floor) {
+        while (excess > 0) {
+            ArrayEntry* biggest = nullptr;
+            for (auto& e : entries) {
+                if ((e.elemOp == kOpTypeSampler) != samplerKind) continue;
+                if (e.finalLen <= floor) continue;
+                if (!biggest || e.finalLen > biggest->finalLen) biggest = &e;
+            }
+            if (!biggest) break;
+            uint32_t take = excess;
+            const uint32_t room = biggest->finalLen - floor;
+            if (take > room) take = room;
+            biggest->finalLen -= take;
+            excess -= take;
+        }
+    };
+    // maxPerStageResources (361) counts every descriptor the stage can reach:
+    // images, samplers and the UBOs too, so keep a few slots of margin.
+    const uint32_t otherResources = uniformVarCount + 4;
+    const uint32_t targetTotal = otherResources < 300 ? 361 - otherResources : 128;
+    if (sumByKind(true) > 128) shrinkLargest(true, sumByKind(true) - 128, 32);
+    if (sumByKind(false) > 256) shrinkLargest(false, sumByKind(false) - 256, 48);
+    // Prefer shaving the deduplicated sampler heap further before touching images.
+    uint32_t total = sumByKind(true) + sumByKind(false);
+    if (total > targetTotal) {
+        const uint32_t before = sumByKind(true);
+        shrinkLargest(true, total - targetTotal, 32);
+        total -= (before - sumByKind(true));
+    }
+    if (total > targetTotal) {
+        shrinkLargest(false, total - targetTotal, 48);
+        total = sumByKind(true) + sumByKind(false);
+    }
+    if (total > targetTotal) {
+        LOGW("B10: descriptor arrays still total %u resources against a %u budget; pipelines may be rejected",
+             total, targetTotal);
+    }
+
+    uint32_t nextId = code[3];
+    std::vector<uint32_t> pending;  // new type/constant instructions
+    auto ensureLengthConstant = [&](uint32_t value) -> uint32_t {
+        if (!uintTypeId) {
+            uintTypeId = nextId++;
+            pending.push_back((2u << 16) | kOpTypeInt);
+            pending.push_back(uintTypeId);
+            pending.push_back(32);
+            pending.push_back(0);
+        }
+        for (const auto& kv : constValue) {
+            if (kv.second == value && constType.count(kv.first) && constType[kv.first] == uintTypeId) {
+                return kv.first;
+            }
+        }
+        const uint32_t cid = nextId++;
+        pending.push_back((4u << 16) | kOpConstant);
+        pending.push_back(uintTypeId);
+        pending.push_back(cid);
+        pending.push_back(value);
+        return cid;
+    };
+
+    std::unordered_map<uint32_t, uint32_t> newLenConst;  // array type id -> constant id
+    std::unordered_map<uint32_t, bool> makeFixed;        // runtime array type id -> convert
+    uint32_t changes = 0;
+    for (auto& e : entries) {
+        if (e.declaredLen == 0xFFFFFFFEu) continue;  // length is a spec constant: leave it alone
+        if (e.finalLen == e.declaredLen) continue;   // fixed and already within the budget
+        newLenConst[e.typeId] = ensureLengthConstant(e.finalLen);
+        makeFixed[e.typeId] = (e.declaredLen == 0xFFFFFFFFu);
+        ++changes;
+        LOGI("B10: array type #%u %s -> fixed length %u", e.typeId,
+             e.declaredLen == 0xFFFFFFFFu ? "(runtime array)" : "(oversized)", e.finalLen);
+    }
+    if (!changes) return 0;
+
+    // Rebuild the module: swap the array instructions and insert the new
+    // type/constant instructions immediately before the first rewrite, because
+    // SPIR-V requires every definition to precede its first use (the rewritten
+    // array types are the first users of the new constants).
+    std::vector<uint32_t> out;
+    out.reserve(code.size() + pending.size() + 8);
+    out.insert(out.end(), code.begin(), code.begin() + 5);
+    bool pendingPlaced = pending.empty();
+    for (size_t i = 5; i < code.size();) {
+        const uint32_t len = code[i] >> 16, op = code[i] & 0xFFFF;
+        if (len == 0 || i + len > code.size()) {
+            if (!pendingPlaced) {
+                out.insert(out.end(), pending.begin(), pending.end());
+                pendingPlaced = true;
+            }
+            out.insert(out.end(), code.begin() + i, code.end());
+            break;
+        }
+        const uint32_t idAt = (len >= 2 && (op == kOpTypeArray || op == kOpTypeRuntimeArray)) ? code[i + 1] : 0;
+        const auto mk = makeFixed.find(idAt);
+        const bool runtimeToFixed = (mk != makeFixed.end() && mk->second && op == kOpTypeRuntimeArray);
+        const bool resizeArray = (op == kOpTypeArray && newLenConst.count(idAt) != 0);
+        if (!pendingPlaced && (runtimeToFixed || resizeArray)) {
+            out.insert(out.end(), pending.begin(), pending.end());
+            pendingPlaced = true;
+        }
+        if (runtimeToFixed) {
+            out.push_back((4u << 16) | kOpTypeArray);
+            out.push_back(code[i + 1]);
+            out.push_back(code[i + 2]);
+            out.push_back(newLenConst[idAt]);
+        } else if (resizeArray) {
+            out.insert(out.end(), code.begin() + i, code.begin() + i + len);
+            out.back() = newLenConst[idAt];  // OpTypeArray's last word is the length constant
+        } else {
+            out.insert(out.end(), code.begin() + i, code.begin() + i + len);
+        }
+        i += len;
+    }
+    if (!pendingPlaced) out.insert(out.end(), pending.begin(), pending.end());
+    out[3] = nextId;  // raise the id bound for the instructions we added
+    code.swap(out);
+    LOGI("B10: clamped %u descriptor array type(s) in this module", changes);
+    return changes;
+}
+
 }  // namespace
 
 SpirvRemapper& SpirvRemapper::Instance() {
@@ -332,10 +618,16 @@ bool SpirvRemapper::RemapShader(const uint32_t* pCode, size_t wordCount, std::ve
         tempCode.assign(pCode, pCode + wordCount);
     }
 
-    // Pass the guest's own module through untouched. Still log the descriptor set
-    // inventory so we can see, from the host side, exactly which sets the guest
-    // produced instead of having to infer it from the game's own log. Shader
-    // creation is rare, so this is not worth gating behind a debug level.
+    // B10: the guest's own module is kept except for descriptor array lengths,
+    // which are rewritten to the fixed, budget-sized shapes the Mali driver
+    // accepts (see B10ClampDescriptorArrays; without this every geometry
+    // pipeline with a runtime-array heap dies with VK_ERROR_INITIALIZATION_FAILED).
+    B10ClampDescriptorArrays(tempCode);
+
+    // Log the descriptor set inventory so we can see, from the host side, exactly
+    // which sets the guest produced instead of having to infer it from the game's
+    // own log. Shader creation is rare, so this is not worth gating behind a debug
+    // level.
     {
         std::unordered_map<uint32_t, uint32_t> seen;
         const uint32_t bound = tempCode[3];
