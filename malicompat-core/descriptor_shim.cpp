@@ -1,5 +1,6 @@
 #include "descriptor_shim.h"
 #include "vulkan_layer_exports.h"
+#include <atomic>
 #include <vector>
 #include <cstring>
 #include <cstdlib>
@@ -786,8 +787,14 @@ void VulkanDescriptorShim::InterceptCmdBindDescriptorSets(
     // A5: bind-path tracer. The SIGSEGV moved from pipeline creation (fixed by A4)
     // to somewhere after the descriptor layouts are clamped, so bracket the three
     // remaining descriptor entry points to find which one faults.
-    LOGI("A5: cmdBindDescriptorSets firstSet=%u setCount=%u dynOffsets=%u",
-         (unsigned)firstSet, (unsigned)descriptorSetCount, (unsigned)dynamicOffsetCount);
+    // Rate-limited (B11): tracing every bind flooded logcat with ~1600 lines per second
+    // on the device (74 % of the whole log: pure CPU, I/O and heat on the render
+    // thread). One line every 4096 binds keeps a pulse without the flood.
+    static std::atomic<uint32_t> a5_binds{0};
+    if ((a5_binds.fetch_add(1, std::memory_order_relaxed) & 0xFFFu) == 0) {
+        LOGI("A5: cmdBindDescriptorSets firstSet=%u setCount=%u dynOffsets=%u (1 of every 4096)",
+             (unsigned)firstSet, (unsigned)descriptorSetCount, (unsigned)dynamicOffsetCount);
+    }
 
     if (!realFunc) return;
 
