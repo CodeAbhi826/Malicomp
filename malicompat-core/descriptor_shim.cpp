@@ -423,11 +423,20 @@ VkResult VulkanDescriptorShim::InterceptCreateDescriptorSetLayout(
     // maxPerStageDescriptorSampledImages is a hard guarantee on how many descriptors
     // one shader stage may address, so no amount of splitting avoids it; clamping to
     // it is the only legal shape.
-    if (ClampsEnabled() && pCreateInfo->pBindings && pCreateInfo->bindingCount > 0) {
-        std::vector<VkDescriptorSetLayoutBinding> clamped(pCreateInfo->pBindings,
-                                                          pCreateInfo->pBindings + pCreateInfo->bindingCount);
+    // A9: build the driver-truth binding list once, up front. The cache keeps it so
+    // the F8 dummy pre-fill and the update-path range checks use the counts the
+    // DRIVER layout has -- not the guest's original 4096/512. Writing 4096
+    // descriptors into a set whose layout only holds 256 walked off the end of the
+    // vendor driver's descriptor memory and killed the process with a SIGSEGV right
+    // after the A6 pool clamp (no further layer output, no tombstone).
+    std::vector<VkDescriptorSetLayoutBinding> driverBindings;
+    if (pCreateInfo->pBindings && pCreateInfo->bindingCount > 0) {
+        driverBindings.assign(pCreateInfo->pBindings, pCreateInfo->pBindings + pCreateInfo->bindingCount);
+    }
+
+    if (ClampsEnabled() && !driverBindings.empty()) {
         bool changed = false;
-        for (auto& b : clamped) {
+        for (auto& b : driverBindings) {
             uint32_t limit = 0;
             switch (b.descriptorType) {
                 case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
@@ -454,8 +463,8 @@ VkResult VulkanDescriptorShim::InterceptCreateDescriptorSetLayout(
             }
         }
         if (changed) {
-            sanitizedInfo.pBindings = clamped.data();
-            sanitizedInfo.bindingCount = (uint32_t)clamped.size();
+            sanitizedInfo.pBindings = driverBindings.data();
+            sanitizedInfo.bindingCount = (uint32_t)driverBindings.size();
             // pNext binding-flags array is indexed by binding, and we kept the
             // binding count and ordering identical, so it stays valid as-is.
         }
@@ -465,10 +474,18 @@ VkResult VulkanDescriptorShim::InterceptCreateDescriptorSetLayout(
     if (result == VK_SUCCESS && pSetLayout && *pSetLayout) {
         CachedLayoutInfo cached{};
         cached.createInfo = sanitizedInfo;
+        // sanitizedInfo points at stack locals (the binding-flags pNext chain and the
+        // A4-clamped vector above). Never keep those pointers in the cache; the
+        // bindings pointer is rebound to the owned copy after the map insert below.
+        cached.createInfo.pNext = nullptr;
         if (pCreateInfo->pBindings && pCreateInfo->bindingCount > 0) {
             cached.bindings.assign(pCreateInfo->pBindings, pCreateInfo->pBindings + pCreateInfo->bindingCount);
         }
+        cached.clampedBindings = driverBindings;
         layoutCache_[*pSetLayout] = cached;
+        CachedLayoutInfo& stored = layoutCache_[*pSetLayout];
+        stored.createInfo.pBindings = stored.clampedBindings.empty() ? nullptr : stored.clampedBindings.data();
+        stored.createInfo.bindingCount = (uint32_t)stored.clampedBindings.size();
     }
     return result;
 }
@@ -503,7 +520,13 @@ VkResult VulkanDescriptorShim::InterceptAllocateDescriptorSets(
                 std::vector<std::vector<VkDescriptorImageInfo>> imageInfos;
                 std::vector<std::vector<VkDescriptorBufferInfo>> bufferInfos;
 
-                for (const auto& binding : layoutIt->second.bindings) {
+                // A9: pre-fill using the CLAMPED bindings (driver truth) when present.
+                // Filling with the guest's original 4096/512 counts wrote descriptors
+                // past the end of the clamped set and faulted the vendor driver.
+                const auto& prefillBindings = layoutIt->second.clampedBindings.empty()
+                    ? layoutIt->second.bindings
+                    : layoutIt->second.clampedBindings;
+                for (const auto& binding : prefillBindings) {
                     if (binding.descriptorCount == 0) continue;
 
                     ShadowDescriptorBinding sBinding{};
@@ -692,8 +715,62 @@ void VulkanDescriptorShim::InterceptUpdateDescriptorSets(
         }
     }
 
+    // A9: never forward a write past the driver's clamped binding capacity. The guest
+    // still sizes its heaps for the original 4096/512 bindings; the driver set only
+    // has the A4-clamped counts, so an out-of-range write is an out-of-bounds
+    // descriptor update inside the vendor driver (SIGSEGV, no tombstone). Drop or
+    // truncate those writes; the dummy pre-fill stays in place for the slots that
+    // cannot be represented. In-range writes are passed through untouched.
+    std::vector<VkWriteDescriptorSet> clampedWrites;
+    const VkWriteDescriptorSet* forwardWrites = pDescriptorWrites;
+    uint32_t forwardWriteCount = descriptorWriteCount;
+    if (descriptorWriteCount > 0 && pDescriptorWrites) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        clampedWrites.assign(pDescriptorWrites, pDescriptorWrites + descriptorWriteCount);
+        uint32_t out = 0;
+        bool anyClamped = false;
+        for (auto& write : clampedWrites) {
+            uint32_t cap = 0;
+            auto setIt = shadowSets_.find(write.dstSet);
+            if (setIt != shadowSets_.end()) {
+                auto layoutIt = layoutCache_.find(setIt->second.layout);
+                if (layoutIt != layoutCache_.end()) {
+                    for (const auto& b : layoutIt->second.clampedBindings) {
+                        if (b.binding == write.dstBinding) { cap = b.descriptorCount; break; }
+                    }
+                }
+            }
+            if (cap == 0) {  // unknown binding: forward untouched
+                clampedWrites[out++] = write;
+                continue;
+            }
+            if (write.dstArrayElement >= cap) {
+                LOGW("A9: dropping descriptor write binding=%u first=%u count=%u "
+                     "(driver layout holds %u; guest heap sized for more)",
+                     (unsigned)write.dstBinding, (unsigned)write.dstArrayElement,
+                     (unsigned)write.descriptorCount, (unsigned)cap);
+                anyClamped = true;
+                continue;
+            }
+            if (write.dstArrayElement + write.descriptorCount > cap) {
+                LOGW("A9: truncating descriptor write binding=%u first=%u count=%u -> %u "
+                     "(driver layout holds %u)",
+                     (unsigned)write.dstBinding, (unsigned)write.dstArrayElement,
+                     (unsigned)write.descriptorCount, (unsigned)(cap - write.dstArrayElement),
+                     (unsigned)cap);
+                write.descriptorCount = cap - write.dstArrayElement;
+                anyClamped = true;
+            }
+            clampedWrites[out++] = write;
+        }
+        if (anyClamped) {
+            forwardWrites = clampedWrites.data();
+            forwardWriteCount = out;
+        }
+    }
+
     // Dispatch update to real driver
-    realFunc(device, descriptorWriteCount, pDescriptorWrites, descriptorCopyCount, pDescriptorCopies);
+    realFunc(device, forwardWriteCount, forwardWrites, descriptorCopyCount, pDescriptorCopies);
 }
 
 void VulkanDescriptorShim::InterceptCmdBindDescriptorSets(

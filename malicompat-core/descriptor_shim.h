@@ -30,7 +30,13 @@ struct ShadowDescriptorSet {
 
 struct CachedLayoutInfo {
     VkDescriptorSetLayoutCreateInfo createInfo{};
-    std::vector<VkDescriptorSetLayoutBinding> bindings;
+    std::vector<VkDescriptorSetLayoutBinding> bindings;  // guest-declared, original counts
+    // A9: the bindings the driver's layout actually has (A4 clamps applied). The F8
+    // dummy pre-fill and the update-path range checks must use THESE counts, never
+    // the guest's originals: with 4096/512 declared against a clamped 256/128 layout
+    // the vendor driver walked off the end of the descriptor set and SIGSEGV'd right
+    // after the A6 pool clamp (no further layer output, no tombstone).
+    std::vector<VkDescriptorSetLayoutBinding> clampedBindings;
 };
 
 struct DeviceDummyResources {
