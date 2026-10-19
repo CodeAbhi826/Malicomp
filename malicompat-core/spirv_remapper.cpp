@@ -172,10 +172,23 @@ uint32_t B9ProbeModule(const std::vector<uint32_t>& code) {
 // layouts still hold their clamped capacity, and every slot is dummy-filled
 // (F8), so even an out-of-range index lands on a valid dummy descriptor.
 //
-// The only thing this changes is array lengths: ids, decorations and every
-// instruction are left alone. Returns how many array types were rewritten.
+// The only thing this changes is array lengths and those two declarations: ids,
+// decorations and every other instruction are left alone. Returns how many array
+// types were rewritten (plus one when the declarations were also dropped).
+//
+// Run20 confirmed the arrays no longer decide the outcome: with them fixed the
+// driver still returned -3 for the same 13 pipelines. The missing piece is the
+// module's declaration list: the guest's translator also emits OpCapability
+// RuntimeDescriptorArray and OpExtension "SPV_EXT_descriptor_indexing" (even in
+// the vertex shaders that have no descriptors at all), because the M19 spoof made
+// it believe the feature exists. vkCreateShaderModule accepts them (Mali only
+// stores the module there), but the shader compiler runs at pipeline creation,
+// where a declared capability the device lacks is a hard failure. With the
+// runtime arrays gone the declarations are unused, so they are dropped here.
 uint32_t B10ClampDescriptorArrays(std::vector<uint32_t>& code) {
     enum {
+        kOpExtension = 10,
+        kOpCapability = 17,
         kOpTypeInt = 21,
         kOpTypeImage = 25,
         kOpTypeSampler = 26,
@@ -185,6 +198,7 @@ uint32_t B10ClampDescriptorArrays(std::vector<uint32_t>& code) {
         kOpTypePointer = 32,
         kOpConstant = 43,
         kOpFunction = 54,
+        kCapabilityRuntimeDescriptorArray = 5302,
     };
 
     if (code.size() < 5 || code[0] != 0x07230203) return 0;
@@ -204,13 +218,29 @@ uint32_t B10ClampDescriptorArrays(std::vector<uint32_t>& code) {
     std::unordered_map<uint32_t, uint32_t> typeOp, arrayElem, arrayLenConst, pointerTo;
     std::unordered_map<uint32_t, uint32_t> setOf, bindingOf, constValue, constType;
     std::vector<std::pair<uint32_t, uint32_t>> vars;  // (variable id, result type id)
+    std::vector<size_t> stripWords;  // word offsets of declaration instructions to drop
     uint32_t uintTypeId = 0;
     uint32_t uniformVarCount = 0;  // UBO variables, counted against the stage total
+
+    // True when the OpExtension's literal string is exactly `wanted`.
+    auto extensionIs = [&](size_t i, uint32_t len, const char* wanted) {
+        const size_t wantedLen = strlen(wanted);
+        if ((size_t)(len - 1) * 4 < wantedLen + 1) return false;
+        const char* s = reinterpret_cast<const char*>(&code[i + 1]);
+        return memcmp(s, wanted, wantedLen) == 0 && s[wantedLen] == '\0';
+    };
 
     for (size_t i = 5; i < code.size();) {
         const uint32_t len = code[i] >> 16, op = code[i] & 0xFFFF;
         if (len == 0 || i + len > code.size()) break;
-        if (op == kOpTypeInt && len >= 4 && code[i + 2] == 32 && code[i + 3] == 0 && !uintTypeId) {
+        if (op == kOpCapability && len >= 2 && code[i + 1] == kCapabilityRuntimeDescriptorArray) {
+            // The guest's translator emits this because the M19 spoof made it
+            // believe runtimeDescriptorArray=true. Mali (M24 raw: 0) refuses to
+            // compile a module that declares it, at pipeline creation.
+            stripWords.push_back(i);
+        } else if (op == kOpExtension && len >= 2 && extensionIs(i, len, "SPV_EXT_descriptor_indexing")) {
+            stripWords.push_back(i);
+        } else if (op == kOpTypeInt && len >= 4 && code[i + 2] == 32 && code[i + 3] == 0 && !uintTypeId) {
             uintTypeId = code[i + 1];
         } else if (op == kOpConstant && len >= 4) {
             constValue[code[i + 2]] = code[i + 3];
@@ -262,7 +292,6 @@ uint32_t B10ClampDescriptorArrays(std::vector<uint32_t>& code) {
         arrayUsers[t].push_back({setOf.count(v.first) ? setOf[v.first] : 0,
                                  bindingOf.count(v.first) ? bindingOf[v.first] : 0});
     }
-    if (arrayUsers.empty()) return 0;
 
     struct ArrayEntry {
         uint32_t typeId = 0;
@@ -388,7 +417,29 @@ uint32_t B10ClampDescriptorArrays(std::vector<uint32_t>& code) {
         LOGI("B10: array type #%u %s -> fixed length %u", e.typeId,
              e.declaredLen == 0xFFFFFFFFu ? "(runtime array)" : "(oversized)", e.finalLen);
     }
-    if (!changes) return 0;
+
+    // Drop the descriptor-indexing declarations as well: with every descriptor
+    // runtime array now a fixed array, nothing needs the capability, and Mali
+    // compiles the module at pipeline creation, where it rejects a capability the
+    // device does not have (this is the -3 that survived the array rewrite).
+    // Keep them when some runtime array of descriptors would survive the pass, so
+    // the module stays coherent.
+    bool stripDescriptorIndexing = !stripWords.empty();
+    if (stripDescriptorIndexing) {
+        for (const auto& kv : typeOp) {
+            if (kv.second != kOpTypeRuntimeArray || makeFixed.count(kv.first)) continue;
+            const auto eIt = arrayElem.find(kv.first);
+            if (eIt == arrayElem.end()) continue;
+            const auto elemIt = typeOp.find(eIt->second);
+            if (elemIt == typeOp.end()) continue;
+            if (elemIt->second == kOpTypeImage || elemIt->second == kOpTypeSampler ||
+                elemIt->second == kOpTypeSampledImage) {
+                stripDescriptorIndexing = false;  // a descriptor runtime array remains
+                break;
+            }
+        }
+    }
+    if (!changes && !stripDescriptorIndexing) return 0;
 
     // Rebuild the module: swap the array instructions and insert the new
     // type/constant instructions immediately before the first rewrite, because
@@ -398,6 +449,7 @@ uint32_t B10ClampDescriptorArrays(std::vector<uint32_t>& code) {
     out.reserve(code.size() + pending.size() + 8);
     out.insert(out.end(), code.begin(), code.begin() + 5);
     bool pendingPlaced = pending.empty();
+    size_t stripIdx = 0;
     for (size_t i = 5; i < code.size();) {
         const uint32_t len = code[i] >> 16, op = code[i] & 0xFFFF;
         if (len == 0 || i + len > code.size()) {
@@ -407,6 +459,11 @@ uint32_t B10ClampDescriptorArrays(std::vector<uint32_t>& code) {
             }
             out.insert(out.end(), code.begin() + i, code.end());
             break;
+        }
+        while (stripIdx < stripWords.size() && stripWords[stripIdx] < i) ++stripIdx;
+        if (stripDescriptorIndexing && stripIdx < stripWords.size() && stripWords[stripIdx] == i) {
+            i += len;  // drop the declaration
+            continue;
         }
         const uint32_t idAt = (len >= 2 && (op == kOpTypeArray || op == kOpTypeRuntimeArray)) ? code[i + 1] : 0;
         const auto mk = makeFixed.find(idAt);
@@ -432,8 +489,13 @@ uint32_t B10ClampDescriptorArrays(std::vector<uint32_t>& code) {
     if (!pendingPlaced) out.insert(out.end(), pending.begin(), pending.end());
     out[3] = nextId;  // raise the id bound for the instructions we added
     code.swap(out);
-    LOGI("B10: clamped %u descriptor array type(s) in this module", changes);
-    return changes;
+    if (changes) {
+        LOGI("B10: clamped %u descriptor array type(s) in this module", changes);
+    }
+    if (stripDescriptorIndexing) {
+        LOGI("B10: stripped the descriptor-indexing declarations (OpCapability RuntimeDescriptorArray + SPV_EXT_descriptor_indexing)");
+    }
+    return changes + (stripDescriptorIndexing ? 1u : 0u);
 }
 
 }  // namespace
